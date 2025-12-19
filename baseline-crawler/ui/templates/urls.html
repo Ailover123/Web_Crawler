@@ -1,0 +1,29 @@
+{% extends "layout.html" %}
+
+{% block title %}Crawl Overview{% endblock %}
+
+{% block content %}
+<h2>Crawl Overview</h2>
+<table>
+    <thead>
+        <tr>
+            <th>URL</th>
+            <th>Crawl Depth</th>
+            <th>Status</th>
+            <th>First Discovered At</th>
+            <th>Last Crawled At</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for url in urls %}
+        <tr>
+            <td>{{ url.url }}</td>
+            <td>{{ url.crawl_depth }}</td>
+            <td>{{ url.status }}</td>
+            <td>{{ url.first_discovered_at }}</td>
+            <td>{{ url.last_crawled_at }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

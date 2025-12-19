@@ -1,0 +1,29 @@
+{% extends "layout.html" %}
+
+{% block title %}Defacement Alerts{% endblock %}
+
+{% block content %}
+<h2>Defacement Alerts</h2>
+<table>
+    <thead>
+        <tr>
+            <th>URL</th>
+            <th>Severity</th>
+            <th>Diff Summary</th>
+            <th>Detected At</th>
+            <th>Status</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for alert in alerts %}
+        <tr class="severity-{{ alert.severity }}">
+            <td>{{ alert.url }}</td>
+            <td>{{ alert.severity }}</td>
+            <td><pre>{{ alert.diff_summary_pretty }}</pre></td>
+            <td>{{ alert.detected_at }}</td>
+            <td>{{ alert.status }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
