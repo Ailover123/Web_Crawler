@@ -2,17 +2,24 @@
 #Seperate file for better change management to handle the behaviour of crawler without changing the main codebase
 #Easier to test and maintain
 
-#This is where crawling starts from
-SEED_URLS = []
+# Initial URLs to start crawling from (MANDATORY)
+SEED_URLS = [
+    "http://localhost:8000/test.html"
+]
 
-#Maximum depth to crawl
+# Maximum crawl depth
+# 0 = only seed URLs
 DEPTH_LIMIT = 0
 
-#Domains allowed to crawl, only to avoid external links
+# Domains allowed to crawl
+# Empty = restrict to seed domains only
 ALLOWED_DOMAINS = []
 
-#Time to wait between requests to the same domain (in seconds)
-REQUEST_TIMEOUT = 5
+# Network timeout for HTTP requests (seconds)
+REQUEST_TIMEOUT = 10
 
-#User-Agent string to identify the crawler
+# Delay between requests to the same domain (seconds)
+REQUEST_DELAY = 1
+
+# User-Agent string for crawler identification
 USER_AGENT = "BaselineCrawler/1.0"
