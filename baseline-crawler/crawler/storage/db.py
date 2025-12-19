@@ -29,7 +29,7 @@ def initialize_db():
       first_discovered_at TEXT,
       last_crawled_at TEXT,
       crawl_depth INTEGER,
-      status INTEGER           
+      status TEXT          
   );
   """)
   # URL inventory table tracks crawl coverage and scope
@@ -45,6 +45,20 @@ def initialize_db():
   );
   """)
   # Baseline table stores trusted fingerprints for defacement detection
+
+  cursor.execute("""
+  CREATE TABLE IF NOT EXISTS diff_evidence (
+    id INTEGER PRIMARY KEY,
+    url TEXT NOT NULL,
+    baseline_hash TEXT NOT NULL,
+    observed_hash TEXT NOT NULL,
+    diff_summary TEXT,
+    severity TEXT,
+    detected_at TEXT,
+    status TEXT
+  );
+  """)
+  # Diff evidence table logs detected changes against baselines
 
   conn.commit()
   cursor.close()
