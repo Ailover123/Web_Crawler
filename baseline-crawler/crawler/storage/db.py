@@ -34,6 +34,18 @@ def initialize_db():
   """)
   # URL inventory table tracks crawl coverage and scope
 
+  cursor.execute(""" 
+  CREATE TABLE IF NOT EXISTS baseline (
+    id INTEGER PRIMARY KEY,
+    url TEXT UNIQUE NOT NULL,
+    html_hash TEXT NOT NULL,
+    script_sources TEXT,
+    baseline_created_at TEXT,
+    baseline_updated_at TEXT
+  );
+  """)
+  # Baseline table stores trusted fingerprints for defacement detection
+
   conn.commit()
   cursor.close()
   conn.close()  
