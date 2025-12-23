@@ -17,7 +17,7 @@ from crawler.storage.url_store import insert_url, update_crawl_metadata, url_exi
 from crawler.storage.baseline_store import store_baseline
 from crawler.storage.diff_store import store_diff
 from urllib.parse import urlparse
-from crawler.normalizer import normalize_url, strip_trivial_comments, semantic_normalize_html
+from crawler.normalizer import normalize_url, strip_trivial_comments, semantic_normalize_html,normalize_html
 import os
 from datetime import datetime
 
