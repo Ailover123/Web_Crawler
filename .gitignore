@@ -1,0 +1,23 @@
+# Ignore runtime data (database, snapshots)
+data/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.vscode/
+
+# Logs
+*.log
+
+# Ignore local Python bytecode
+*.pyc
