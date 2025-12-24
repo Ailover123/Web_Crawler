@@ -1,0 +1,16 @@
+{% extends "layout.html" %}
+{% block title %}Baseline Detail{% endblock %}
+
+{% block content %}
+<h2>Baseline Detail</h2>
+
+<p><strong>URL:</strong> {{ baseline.url }}</p>
+<p><strong>HTML Hash:</strong> {{ baseline.html_hash }}</p>
+<p><strong>Created:</strong> {{ baseline.baseline_created_at }}</p>
+<p><strong>Updated:</strong> {{ baseline.baseline_updated_at }}</p>
+<p><strong>Snapshot Size:</strong> {{ size_kb }} KB</p>
+
+<h3>Baseline HTML Snapshot</h3>
+
+<pre class="pre-baseline-html">{{ html_content | e }}</pre>
+{% endblock %}

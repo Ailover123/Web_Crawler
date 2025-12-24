@@ -1,34 +1,31 @@
-# To parse HTML, JS, JSON baseline data into structured format
- 
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin  
-# urljoin is used to safely resolve relative URLs like "/about"
-
-# Inputs:
-# - html: raw HTML string from HTTP response
-# - base_url: URL of the page (used for resolving relative links)
-
-# Returns:
-# - soup: BeautifulSoup object (HTML structure)
-# - links: list of absolute URLs found in <a href>
-# - scripts: list of absolute URLs found in <script src>
+from urllib.parse import urljoin
 
 def parse_html(html, base_url):
-    """Parse HTML content and extract links and text."""
+    """
+    Parse HTML content and extract:
+    - soup (BeautifulSoup object)
+    - links (absolute URLs from <a href>)
+    - script_sources (external <script src>)
+    - script_count (inline + external scripts)
+    """
     soup = BeautifulSoup(html, 'html.parser')
+
     links = []
-    scripts=[]
- 
+    script_sources = []
+
+    # Extract links
     for a in soup.find_all('a', href=True):
         absolute_url = urljoin(base_url, a['href'])
         links.append(absolute_url)
-#Here we are using urljoin to convert relative URLs to absolute URLs based on the base_url of the page.
-# This ensures that links like "/about" are correctly resolved to "http://example.com/about" if the base_url is "http://example.com/page".
-# This is crucial for accurate link extraction in web crawling.
 
-    for script in soup.find_all('script', src=True):
-        absolute_url = urljoin(base_url, script['src'])  
-        scripts.append(absolute_url)
-# Similarly, resolving script src URLs to absolute URLs             
-    
-    return soup,links,scripts
+    # Extract scripts
+    all_scripts = soup.find_all('script')
+    script_count = len(all_scripts)
+
+    for script in all_scripts:
+        if script.has_attr('src'):
+            absolute_url = urljoin(base_url, script['src'])
+            script_sources.append(absolute_url)
+
+    return soup, links, script_sources, script_count

@@ -4,9 +4,10 @@
 
 {% block content %}
 <h2>Baseline Overview</h2>
-<table>
+<table class="data-table">
     <thead>
         <tr>
+            <th>Sr. No.</th>
             <th>URL</th>
             <th>HTML Hash (Short)</th>
             <th>Baseline Created At</th>
@@ -16,6 +17,7 @@
     <tbody>
         {% for baseline in baselines %}
         <tr>
+            <td>{{ loop.index }}</td>
             <td>{{ baseline.url }}</td>
             <td>{{ baseline.html_hash_short }}</td>
             <td>{{ baseline.baseline_created_at }}</td>

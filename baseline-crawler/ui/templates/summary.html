@@ -1,0 +1,85 @@
+{% extends "layout.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<h2>Defacement Detection Dashboard</h2>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <h3>Total URLs</h3>
+        <p class="stat-number">{{ stats.total_urls }}</p>
+    </div>
+    <div class="stat-card">
+        <h3>URLs Crawled</h3>
+        <p class="stat-number">{{ stats.crawled_urls }}</p>
+    </div>
+    <div class="stat-card">
+        <h3>Fetch Failures</h3>
+        <p class="stat-number">{{ stats.fetch_failures }}</p>
+    </div>
+    <div class="stat-card">
+        <h3>Baselines Created</h3>
+        <p class="stat-number">{{ stats.baselines_created }}</p>
+    </div>
+    <div class="stat-card">
+        <h3>Open Alerts</h3>
+        <p class="stat-number">{{ stats.open_alerts }}</p>
+    </div>
+    <div class="stat-card">
+        <h3>High Severity</h3>
+        <p class="stat-number">{{ stats.high_severity }}</p>
+    </div>
+    <div class="stat-card">
+        <h3>Medium Severity</h3>
+        <p class="stat-number">{{ stats.medium_severity }}</p>
+    </div>
+</div>
+
+<div class="dashboard-section">
+    <h3>Recent Alerts</h3>
+    <table class="dashboard-table">
+        <thead>
+            <tr>
+                <th>Sr. No.</th>
+                <th>URL</th>
+                <th>Severity</th>
+                <th>Detected At</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for alert in alerts %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ alert.url }}</td>
+                <td>{{ alert.severity }}</td>
+                <td>{{ alert.detected_at_ist or alert.detected_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="dashboard-section">
+    <h3>Recent Fetch Failures</h3>
+    <div class="scrollable-table-container">
+        <table class="dashboard-table">
+            <thead>
+                <tr>
+                    <th>Sr. No.</th>
+                    <th>URL</th>
+                    <th>Last Attempt</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for failure in failures %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ failure.url }}</td>
+                    <td>{{ failure.last_crawled_at_ist or failure.last_crawled_at or 'N/A' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

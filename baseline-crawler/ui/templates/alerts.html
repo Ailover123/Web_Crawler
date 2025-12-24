@@ -1,27 +1,32 @@
 {% extends "layout.html" %}
-
-{% block title %}Defacement Alerts{% endblock %}
+{% block title %}Alerts{% endblock %}
 
 {% block content %}
 <h2>Defacement Alerts</h2>
-<table>
+
+<table class="data-table">
     <thead>
         <tr>
+            <th>Sr. No.</th>
             <th>URL</th>
             <th>Severity</th>
-            <th>Diff Summary</th>
             <th>Detected At</th>
-            <th>Status</th>
+            <th>Diff Summary</th>
         </tr>
     </thead>
     <tbody>
-        {% for alert in alerts %}
-        <tr class="severity-{{ alert.severity }}">
-            <td>{{ alert.url }}</td>
-            <td>{{ alert.severity }}</td>
-            <td><pre>{{ alert.diff_summary_pretty }}</pre></td>
-            <td>{{ alert.detected_at }}</td>
-            <td>{{ alert.status }}</td>
+        {% for a in alerts %}
+        <tr>
+            <td>{{ loop.index }}</td>
+            <td>{{ a.url }}</td>
+            <td>{{ a.severity }}</td>
+    <td>{{ a.detected_at_ist or a.detected_at }}</td>
+            <td>
+                <pre class="pre-diff-summary">
+{{ a.diff_summary_pretty }}
+                </pre>
+                <a href="/alert/{{ a.id }}" class="view-button-large">View Details</a>
+            </td>
         </tr>
         {% endfor %}
     </tbody>

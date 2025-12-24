@@ -1,27 +1,29 @@
 {% extends "layout.html" %}
-
-{% block title %}Crawl Overview{% endblock %}
+{% block title %}URLs{% endblock %}
 
 {% block content %}
 <h2>Crawl Overview</h2>
-<table>
+
+<table class="data-table">
     <thead>
         <tr>
+            <th>Sr. No.</th>
             <th>URL</th>
-            <th>Crawl Depth</th>
             <th>Status</th>
-            <th>First Discovered At</th>
-            <th>Last Crawled At</th>
+            <th>Depth</th>
+            <th>First Seen</th>
+            <th>Last Crawled</th>
         </tr>
     </thead>
     <tbody>
-        {% for url in urls %}
+        {% for u in urls %}
         <tr>
-            <td>{{ url.url }}</td>
-            <td>{{ url.crawl_depth }}</td>
-            <td>{{ url.status }}</td>
-            <td>{{ url.first_discovered_at }}</td>
-            <td>{{ url.last_crawled_at }}</td>
+            <td>{{ loop.index }}</td>
+            <td>{{ u.url }}</td>
+            <td>{{ u.status }}</td>
+            <td>{{ u.crawl_depth }}</td>
+            <td>{{ u.first_discovered_at }}</td>
+            <td>{{ u.last_crawled_at }}</td>
         </tr>
         {% endfor %}
     </tbody>

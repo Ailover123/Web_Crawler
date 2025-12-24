@@ -10,6 +10,7 @@
 
 from datetime import datetime, timezone
 from crawler.storage.db import get_connection
+from crawler.normalizer import normalize_url
 
 def now():
   return datetime.now(timezone.utc).isoformat()
@@ -18,12 +19,13 @@ def insert_url(url, crawl_depth):
 # Insert a new URL into the inventory.
  conn = get_connection()
  cursor = conn.cursor()
+ nurl = normalize_url(url)
  cursor.execute("""
  INSERT OR IGNORE INTO urls 
  (url, first_discovered_at, crawl_depth, status)
  VALUES (?, ?, ?, ?);
  """, 
- (url, now(), crawl_depth, "active")
+ (nurl, now(), crawl_depth, "active")
  )
  # INSERT OR IGNORE prevents duplicate URL entries
  conn.commit()
@@ -34,12 +36,13 @@ def insert_url(url, crawl_depth):
 def update_crawl_metadata(url, status):
   conn = get_connection()
   cursor = conn.cursor()
+  nurl = normalize_url(url)
   cursor.execute("""
   UPDATE urls
   Set last_crawled_at = ?, status = ?
   WHERE url = ?
   """,
-  (now(), status, url)
+  (now(), status, nurl)
   )
 # Update crawl timestamp and status for the given URL
   conn.commit()
@@ -51,10 +54,11 @@ def url_exists(url):
   #Check if a URL exists in the inventory.
   conn = get_connection()
   cursor = conn.cursor()
+  nurl = normalize_url(url)
   cursor.execute("""
   SELECT 1 FROM urls WHERE url = ? LIMIT 1;
   """, 
-  (url,)) 
+  (nurl,)) 
 
   result = cursor.fetchone()
   cursor.close()
@@ -74,4 +78,17 @@ def get_active_urls():
   cursor.close()
   conn.close()             
 
+  return rows
+
+
+def get_all_urls():
+  #Retrieve URLs for monitoring runs: include active and crawled statuses
+  conn = get_connection()
+  cursor = conn.cursor()
+  cursor.execute("""
+  SELECT url, crawl_depth FROM urls WHERE status IN ('active', 'crawled');
+  """)
+  rows = cursor.fetchall()
+  cursor.close()
+  conn.close()
   return rows
