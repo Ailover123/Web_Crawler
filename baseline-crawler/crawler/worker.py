@@ -7,7 +7,11 @@ import threading
 from crawler.fetcher import fetch
 from crawler.parser import extract_urls
 from crawler.normalizer import normalize_url
+from crawler.storage.db import get_connection
 import time
+import json
+from urllib.parse import urlparse
+from datetime import datetime, timezone
 
 class Worker(threading.Thread):
     """
@@ -41,6 +45,8 @@ class Worker(threading.Thread):
                 print(f"[FETCH] {url}")
                 # Fetch
                 response = fetch(url, discovered_from, depth)
+                domain = urlparse(url).netloc
+                timestamp = datetime.now(timezone.utc).isoformat()
                 if response:
                     # Parse and enqueue new URLs and record assets
                     html = response.text
@@ -59,7 +65,26 @@ class Worker(threading.Thread):
                         normalized_asset = normalize_url(asset)
                         if normalized_asset not in self.frontier.routing_graph[normalized_parent]:
                             self.frontier.routing_graph[normalized_parent].append(normalized_asset)
+
+                    # Record to domain-specific DB
+                    conn = get_connection(domain)
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (domain, url, discovered_from, json.dumps(new_urls), response.status_code, 0.0, len(response.content), timestamp))
+                    conn.commit()
+                    conn.close()
                 else:
+                    # Record failed fetch
+                    conn = get_connection(domain)
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (domain, url, discovered_from, json.dumps([]), 0, 0.0, 0, timestamp))
+                    conn.commit()
+                    conn.close()
                     print(f"[WORKER-{self.name}] fetch returned no response for {url}")
             except Exception as e:
                 # Log the exception to prevent silent failures that cause crawler to hang
