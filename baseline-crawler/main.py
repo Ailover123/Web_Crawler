@@ -13,6 +13,7 @@ import os
 import json
 from urllib.parse import urlparse
 from threading import Lock
+from combined_domain_analysis import generate_combined_domain_analysis
 def main():
     # Extract unique domains from seed URLs
     domains = set()
