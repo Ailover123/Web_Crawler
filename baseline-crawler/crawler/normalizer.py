@@ -21,23 +21,21 @@ def normalize_html(soup):
 
 
 def normalize_url(url):
-  """Normalize URLs for enqueueing and DB keys.
-
-  - Lowercase scheme and netloc
-  - Remove trailing slash except for bare domain (homepage)
-  - Strip params, query, fragment
-  """
-  from urllib.parse import urlparse, urlunparse
-  try:
-    p = urlparse(url)
-    scheme = p.scheme.lower()
-    netloc = p.netloc.lower()
-    # Remove trailing slash from path but keep single-root path as empty
-    path = p.path.rstrip('/')
-    normalized = urlunparse((scheme, netloc, path or '', '', '', ''))
-    return normalized
-  except Exception:
-    return url
+    """
+    Normalize URLs by removing trailing slash from path, except for root.
+    Do NOT normalize query params, fragments, or CMS paths.
+    """
+    from urllib.parse import urlparse, urlunparse
+    try:
+        p = urlparse(url)
+        # Only modify path: remove trailing / if not root
+        path = p.path
+        if path.endswith('/') and path != '/':
+            path = path.rstrip('/')
+        normalized = urlunparse((p.scheme, p.netloc, path, p.params, p.query, p.fragment))
+        return normalized
+    except Exception:
+        return url
 
 
 def strip_trivial_comments(html_text):

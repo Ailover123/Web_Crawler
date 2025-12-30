@@ -1,24 +1,24 @@
-"""Fetch utilities for the crawler.
-
-This module intentionally keeps a stable contract: callers receive either a
-``requests.Response`` for successful HTML/JSON responses, or a plain `dict`
-with ``ok: False`` and diagnostic fields. This avoids AttributeError in
-callers that expect a Response object.
+"""
+HTTP fetching module for the crawler.
+Fetches URLs and records results to the database.
+Only fetches HTML content.
 """
 
 import requests
 import time
-from crawler.config import USER_AGENT, REQUEST_TIMEOUT, REQUEST_DELAY
+from urllib.parse import urlparse
+from crawler.config import USER_AGENT, REQUEST_TIMEOUT
+from crawler.storage.db import get_connection
 
-
-def fetch(url):
-    """Fetch a URL and return a Response or a failure dict.
-
-    Returns:
-      - ``requests.Response`` on success (only for content types containing
-        ``html`` or ``json``)
-      - ``dict`` with ``ok: False`` and diagnostics on failure
+def fetch(url, discovered_from=None, depth=0):
     """
+    Fetch a URL, classify outcome, record to DB.
+    Returns the requests.Response on success, or None otherwise.
+    Always records to DB.
+    """
+    start_time = time.time()
+    domain = urlparse(url).netloc
+
     try:
         r = requests.get(
             url,
@@ -27,23 +27,57 @@ def fetch(url):
             verify=True,
             allow_redirects=True,
         )
-    except requests.exceptions.RequestException as e:
-        return {"ok": False, "url": url, "error": "request_exception", "message": str(e)}
-
-    # Check HTTP status
-    try:
-        r.raise_for_status()
-    except requests.exceptions.HTTPError as e:
+        fetch_time_ms = int((time.time() - start_time) * 1000)
+        response_size = len(r.content)
         ct = r.headers.get("Content-Type", "").lower()
-        return {"ok": False, "url": url, "error": "http_error", "status_code": r.status_code, "content_type": ct, "message": str(e)}
 
-    # Accept only HTML or JSON for crawling
-    ct = r.headers.get("Content-Type", "").lower()
-    if "html" in ct or "json" in ct:
-        try:
-            time.sleep(REQUEST_DELAY)
-        except Exception:
-            pass
-        return r
+        if 200 <= r.status_code < 300:
+            if "text/html" in ct or "application/json" in ct:
+                # Success
+                # _record_to_db(url, domain, "success", r.status_code, ct, response_size, fetch_time_ms, None, discovered_from, depth)
+                return r
+            else:
+                # Ignored
+                # _record_to_db(url, domain, "ignored", r.status_code, ct, response_size, fetch_time_ms, None, discovered_from, depth)
+                return None
+        else:
+            # Fetch failed
+            # _record_to_db(url, domain, "fetch_failed", r.status_code, ct, response_size, fetch_time_ms, "http_error", discovered_from, depth)
+            return None
 
-    return {"ok": False, "url": url, "error": "unsupported_content_type", "status_code": r.status_code, "content_type": ct}
+    except requests.exceptions.Timeout:
+        fetch_time_ms = int((time.time() - start_time) * 1000)
+        # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "timeout", discovered_from, depth)
+        return None
+    except requests.exceptions.ConnectionError:
+        fetch_time_ms = int((time.time() - start_time) * 1000)
+        # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "connection_error", discovered_from, depth)
+        return None
+    except requests.exceptions.RequestException as e:
+        fetch_time_ms = int((time.time() - start_time) * 1000)
+        # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "request_error", discovered_from, depth)
+        return None
+
+def _record_to_db(url, domain, status, http_status, content_type, response_size, fetch_time_ms, error_type, discovered_from, depth):
+    """
+    Record the fetch result to the database using UPSERT for idempotency.
+    """
+    print(f"[DB] recording: {url}")
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO urls (url, domain, status, http_status, content_type, response_size, fetch_time_ms, error_type, discovered_from, depth, crawled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(url) DO UPDATE SET
+            status=excluded.status,
+            http_status=excluded.http_status,
+            content_type=excluded.content_type,
+            response_size=excluded.response_size,
+            fetch_time_ms=excluded.fetch_time_ms,
+            error_type=excluded.error_type,
+            discovered_from=excluded.discovered_from,
+            depth=excluded.depth,
+            crawled_at=excluded.crawled_at;
+    """, (url, domain, status, http_status, content_type, response_size, fetch_time_ms, error_type, discovered_from, depth))
+    conn.commit()
+    conn.close()
