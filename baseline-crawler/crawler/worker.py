@@ -6,6 +6,7 @@ Each worker fetches a URL, parses it, enqueues new URLs, and marks as visited.
 import threading
 from crawler.fetcher import fetch
 from crawler.parser import extract_urls
+from crawler.normalizer import normalize_url
 import time
 
 class Worker(threading.Thread):
@@ -41,15 +42,23 @@ class Worker(threading.Thread):
                 # Fetch
                 response = fetch(url, discovered_from, depth)
                 if response:
-                    # Parse and enqueue new URLs
+                    # Parse and enqueue new URLs and record assets
                     html = response.text
-                    new_urls = extract_urls(html, url)
+                    new_urls, assets = extract_urls(html, url)
                     for new_url in new_urls:
                         ok = self.frontier.enqueue(new_url, url, depth + 1)
                         if not ok:
                             print(f"[WORKER-{self.name}] enqueue rejected: {new_url}")
                         else:
                             print(f"[WORKER-{self.name}] enqueued: {new_url}")
+                    # Record assets in routing graph
+                    normalized_parent = normalize_url(url)
+                    if normalized_parent not in self.frontier.routing_graph:
+                        self.frontier.routing_graph[normalized_parent] = []
+                    for asset in assets:
+                        normalized_asset = normalize_url(asset)
+                        if normalized_asset not in self.frontier.routing_graph[normalized_parent]:
+                            self.frontier.routing_graph[normalized_parent].append(normalized_asset)
                 else:
                     print(f"[WORKER-{self.name}] fetch returned no response for {url}")
             except Exception as e:

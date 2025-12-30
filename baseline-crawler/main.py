@@ -57,73 +57,7 @@ def main():
         worker.stop()
         worker.join()
 
-    # Compute per-domain statistics
-    # conn = get_connection()
-    # cursor = conn.cursor()
-
-    # # Get all unique domains
-    # cursor.execute("SELECT DISTINCT domain FROM urls")
-    # domains = [row[0] for row in cursor.fetchall()]
-
-    domain_summaries = {}
-    overall_duration = end_time - start_time  # Overall crawl duration
-
-    # New logic for analysis
-    domains = set()
-    for url in frontier.discovered:
-        domain = urlparse(url).netloc
-        domains.add(domain)
-
-    blocked_substrings = [
-        "wp-content",
-        "wp-includes",
-        "wp-json",
-        "elementor",
-        "admin",
-        "login",
-        "assets",
-        "uploads",
-        "api"
-    ]
-
-    for domain in domains:
-        urls_for_domain = [url for url in frontier.discovered if urlparse(url).netloc == domain]
-        total_discovered = len(urls_for_domain)
-
-        substring_breakdown = {}
-        top_examples = {}
-        no_blocked_count = 0
-        no_blocked_examples = []
-
-        for url in urls_for_domain:
-            url_lower = url.lower()
-            matched = False
-            for sub in blocked_substrings:
-                if sub in url_lower:
-                    substring_breakdown[sub] = substring_breakdown.get(sub, 0) + 1
-                    if sub not in top_examples:
-                        top_examples[sub] = []
-                    if len(top_examples[sub]) < 2:
-                        top_examples[sub].append(url)
-                    matched = True
-            if not matched:
-                no_blocked_count += 1
-                if len(no_blocked_examples) < 2:
-                    no_blocked_examples.append(url)
-
-        substring_breakdown["no_blocked_substring"] = no_blocked_count
-        top_examples["no_blocked_substring"] = no_blocked_examples
-
-        domain_summaries[domain] = {
-            "domain": domain,
-            "total_discovered_urls": total_discovered,
-            "substring_breakdown": substring_breakdown,
-            "top_examples": top_examples
-        }
-
-    # Print the JSON reports
-    for domain, summary in domain_summaries.items():
-        print(json.dumps(summary, indent=4))
+    # No per-domain statistics printing in analysis mode
 
     # Generate combined domain analysis JSON
         combined_analysis = generate_combined_domain_analysis(frontier)
