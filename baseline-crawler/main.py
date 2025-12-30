@@ -8,6 +8,7 @@ from crawler.storage.db import initialize_db, get_db_path, get_connection
 from crawler.config import SEED_URLS
 from crawler.frontier import Frontier
 from crawler.worker import Worker
+from combined_domain_analysis import generate_combined_domain_analysis
 import time
 import os
 import json
@@ -76,25 +77,6 @@ def main():
     with open('routing_graph.json', 'w') as f:
         json.dump(frontier.routing_graph, f, indent=4)
 
-    def generate_combined_domain_analysis(frontier):
-        """
-        Generate a combined analysis of all discovered URLs grouped by domain and type.
-        Returns a dict with domain as key and type breakdown as value.
-        """
-        from urllib.parse import urlparse
-        from crawler.parser import classify_url
-        domain_type_summary = {}
-        for url in frontier.discovered:
-            domain = urlparse(url).netloc
-            types = classify_url(url)
-            if domain not in domain_type_summary:
-                domain_type_summary[domain] = {}
-            for t in types:
-                if t not in domain_type_summary[domain]:
-                    domain_type_summary[domain][t] = {"count": 0, "urls": []}
-                domain_type_summary[domain][t]["count"] += 1
-                if len(domain_type_summary[domain][t]["urls"]) < 10:
-                    domain_type_summary[domain][t]["urls"].append({"sr": len(domain_type_summary[domain][t]["urls"]) + 1, "url": url})
-        return {"types_summary": domain_type_summary}
+    
 if __name__ == "__main__":
     main()
