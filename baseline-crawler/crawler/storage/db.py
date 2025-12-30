@@ -1,44 +1,46 @@
 """
 Database connection and initialization for the crawler.
-Creates the URLs table for storing crawl results.
+Creates domain-specific databases with the new schema.
 """
 
 import sqlite3
 from pathlib import Path
 from crawler.config import DATA_DIR
+import os
 
-DB_PATH = DATA_DIR / "crawler.db"
+def get_db_path(domain):
+    """
+    Generate domain-specific database path.
+    """
+    return DATA_DIR / f"data_{domain}.db"
 
-def get_connection():
+def get_connection(domain):
     """
-    Create and return a SQLite database connection.
+    Create and return a SQLite database connection for a specific domain.
     """
-    conn = sqlite3.connect(DB_PATH)
+    db_path = get_db_path(domain)
+    conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
-def initialize_db():
+def initialize_db(domain):
     """
-    Initialize the database tables.
-    Drops and recreates the urls table for crawl results.
+    Initialize the database tables for a specific domain.
+    Creates the new schema table for crawl results.
     """
-    conn = get_connection()
+    conn = get_connection(domain)
     cursor = conn.cursor()
-    cursor.execute("DROP TABLE IF EXISTS urls;")
+    cursor.execute("DROP TABLE IF EXISTS crawl_data;")
     cursor.execute("""
-    CREATE TABLE urls (
-        id INTEGER PRIMARY KEY,
-        url TEXT UNIQUE NOT NULL,
-        domain TEXT NOT NULL,
-        status TEXT NOT NULL,  -- 'success', 'ignored', or 'fetch_failed'
-        http_status INTEGER,   -- HTTP status code
-        content_type TEXT,     -- Content-Type header
-        response_size INTEGER, -- bytes
-        fetch_time_ms INTEGER, -- milliseconds
-        error_type TEXT,       -- 'http_error', 'timeout', 'connection_error', etc.
-        discovered_from TEXT,  -- URL that led to this one, null for seeds
-        depth INTEGER NOT NULL,-- crawl depth
-        crawled_at TEXT NOT NULL  -- timestamp
+    CREATE TABLE crawl_data (
+        domain TEXT,
+        url TEXT PRIMARY KEY,
+        routed_from TEXT,  -- The referrer URL
+        urls_present_on_page TEXT,  -- JSON/Text list of outgoing links
+        fetch_status INTEGER,  -- HTTP status code
+        speed REAL,  -- Fetch duration in ms
+        size INTEGER,  -- Response size in bytes
+        timestamp TEXT  -- Time of crawl (ISO format)
     );
     """)
     conn.commit()

@@ -4,7 +4,7 @@ Initializes DB, seeds frontier, starts workers, waits for completion.
 Computes per-domain crawl statistics, prints summaries, and dumps debug JSON.
 """
 
-from crawler.storage.db import initialize_db, DB_PATH, get_connection
+from crawler.storage.db import initialize_db, get_db_path, get_connection
 from crawler.config import SEED_URLS
 from crawler.frontier import Frontier
 from crawler.worker import Worker
@@ -15,11 +15,18 @@ import json
 from urllib.parse import urlparse
 from threading import Lock
 def main():
-    # Delete existing DB file if it exists
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-    # Initialize DB
-    initialize_db()
+    # Extract unique domains from seed URLs
+    domains = set()
+    for seed_url in SEED_URLS:
+        domain = urlparse(seed_url).netloc
+        domains.add(domain)
+
+    # Initialize domain-specific databases
+    for domain in domains:
+        db_path = get_db_path(domain)
+        if os.path.exists(db_path):
+            os.remove(db_path)
+        initialize_db(domain)
 
     # Create frontier
     frontier = Frontier()
