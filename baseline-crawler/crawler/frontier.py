@@ -73,9 +73,9 @@ class Frontier:
         Returns True if enqueued, False otherwise.
         """
         with self.lock:
-            if not should_enqueue(url):
-                logger.debug(f"enqueue: blocked by policy: {url}")
-                return False  # Block URL based on centralized policy
+            # if not should_enqueue(url):
+            #     logger.debug(f"enqueue: blocked by policy: {url}")
+            #     return False  # Block URL based on centralized policy
             normalized_url = normalize_url(url)
             if normalized_url in self.visited:
                 logger.debug(f"enqueue: already visited: {normalized_url}")
@@ -108,6 +108,8 @@ class Frontier:
                         self.routing_graph[normalized_parent].append(normalized_url)
                 except Exception:
                     logger.debug(f"enqueue: failed to record routing for parent {discovered_from} -> {url}")
+            # Record assets if any
+            # Note: Assets are not enqueued, just recorded
             logger.debug(f"enqueue: queued {normalized_url} (depth={depth}) qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
             return True
 
