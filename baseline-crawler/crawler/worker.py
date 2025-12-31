@@ -44,10 +44,11 @@ class Worker(threading.Thread):
             try:
                 print(f"[FETCH] {url}")
                 # Fetch
-                response = fetch(url, discovered_from, depth)
+                fetch_result = fetch(url, discovered_from, depth)
                 domain = urlparse(url).netloc
                 timestamp = datetime.now(timezone.utc).isoformat()
-                if response:
+                if fetch_result['success']:
+                    response = fetch_result['response']
                     # Parse and enqueue new URLs and record assets
                     html = response.text
                     new_urls, assets = extract_urls(html, url)
@@ -85,7 +86,7 @@ class Worker(threading.Thread):
                     """, (domain, url, discovered_from, json.dumps([]), 0, 0.0, 0, timestamp))
                     conn.commit()
                     conn.close()
-                    print(f"[WORKER-{self.name}] fetch returned no response for {url}")
+                    print(f"[WORKER-{self.name}] fetch failed for {url}: {fetch_result['error']}")
             except Exception as e:
                 # Log the exception to prevent silent failures that cause crawler to hang
                 print(f"[WORKER-{self.name}] Error processing {url}: {e}")

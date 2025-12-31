@@ -12,9 +12,9 @@ from combined_domain_analysis import generate_combined_domain_analysis
 import time
 import os
 import json
+import datetime
 from urllib.parse import urlparse
 from threading import Lock
-from combined_domain_analysis import generate_combined_domain_analysis
 def main():
     # Extract unique domains from seed URLs
     domains = set()
@@ -23,10 +23,17 @@ def main():
         domains.add(domain)
 
     # Initialize domain-specific databases
+    old_runs_dir = os.path.join(os.path.dirname(get_db_path("dummy")), "old_runs")
+    os.makedirs(old_runs_dir, exist_ok=True)
     for domain in domains:
         db_path = get_db_path(domain)
         if os.path.exists(db_path):
-            os.remove(db_path)
+            # Move old DB to old_runs with timestamp
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            old_db_name = f"data_{domain}_{timestamp}.db"
+            old_db_path = os.path.join(old_runs_dir, old_db_name)
+            os.rename(db_path, old_db_path)
+            print(f"Moved old DB for {domain} to {old_db_path}")
         initialize_db(domain)
 
     # Create frontier
@@ -66,10 +73,36 @@ def main():
         worker.stop()
         worker.join()
 
-    # No per-domain statistics printing in analysis mode
+    # Calculate and display crawl statistics
+    crawl_duration = end_time - start_time
+    stats = frontier.get_stats()
+
+    print("\n" + "="*60)
+    print("CRAWL COMPLETED")
+    print("="*60)
+    print(f"Total crawl time: {crawl_duration:.2f} seconds")
+    print(f"URLs visited: {stats['visited_count']}")
+    print(f"URLs in progress: {stats['in_progress_count']}")
+    print(f"URLs remaining in queue: {stats['queue_size']}")
+    print(f"Total workers used: {len(workers)}")
+    print(f"Routing graph size: {len(frontier.routing_graph)} nodes")
+
+    # Per-domain statistics
+    print("\nPer-Domain Statistics:")
+    for domain in domains:
+        conn = get_connection(domain)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM crawl_data")
+        url_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM crawl_data WHERE fetch_status = 200")
+        success_count = cursor.fetchone()[0]
+        conn.close()
+        print(f"  {domain}: {url_count} URLs crawled, {success_count} successful")
+
+    print("="*60)
 
     # Generate combined domain analysis JSON
-        combined_analysis = generate_combined_domain_analysis(frontier)
+    combined_analysis = generate_combined_domain_analysis(frontier)
     with open('combined_domain_analysis.json', 'w') as f:
         json.dump(combined_analysis, f, indent=4)
 

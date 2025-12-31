@@ -7,8 +7,8 @@ from pathlib import Path
 # Initial URLs to start crawling from (MANDATORY)
 SEED_URLS = [
      "https://worldpeoplesolutions.com/",
-     "https://sitewall.net/",
-    "https://uat.pagentra.com/"
+     #"https://sitewall.net/",
+    #"https://uat.pagentra.com/"
 ]
 
 # Network timeout for HTTP requests (seconds)

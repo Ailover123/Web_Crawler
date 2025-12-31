@@ -26,26 +26,23 @@ def should_enqueue(url: str) -> bool:
         logger.info(f"Rejected URL: {url}, reason: non-HTTP scheme ({parsed.scheme})")
         return False
 
-    # Reject URLs with fragments
-    if '#' in url:
-        logger.info(f"Rejected URL: {url}, reason: contains fragment (#)")
-        return False
+    # Allow URLs with fragments (removed blockage)
 
     path = parsed.path.lower()
 
-    # Reject asset extensions
-    # blocked_exts = {'.css', '.js', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.woff', '.woff2', '.ttf', '.eot', '.pdf', '.zip', '.rar', '.tar', '.gz', '.mp3', '.mp4', '.avi', '.mov'}
-    # if any(path.endswith(ext) for ext in blocked_exts):
-    #     logger.info(f"Rejected URL: {url}, reason: asset extension")
-    #     return False
+    # Allow asset extensions (uncommented and allowed)
+    allowed_exts = {'.css', '.js', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.woff', '.woff2', '.ttf', '.eot', '.pdf', '.zip', '.rar', '.tar', '.gz', '.mp3', '.mp4', '.avi', '.mov'}
+    if any(path.endswith(ext) for ext in allowed_exts):
+        logger.info(f"Allowed URL: {url}, reason: asset extension")
+        # Allow assets to be enqueued
 
     url_lower = url.lower()
 
-    # Reject URLs containing specific substrings
-    # blocked_substrings = ['elementor', 'wp-content/uploads', 'wp-includes', 'wp-json', 'off_canvas', 'addtoany']
-    # if any(substring in url_lower for substring in blocked_substrings):
-    #     logger.info(f"Rejected URL: {url}, reason: contains blocked substring")
-    #     return False
+    # Allow URLs containing specific substrings (CMS URLs)
+    allowed_substrings = ['elementor', 'wp-content/uploads', 'wp-includes', 'wp-json', 'off_canvas', 'addtoany']
+    if any(substring in url_lower for substring in allowed_substrings):
+        logger.info(f"Allowed URL: {url}, reason: contains CMS substring")
+        # Allow CMS URLs to be enqueued
 
     return True  # Allow if no rejections match
 
@@ -73,15 +70,15 @@ class Frontier:
         Returns True if enqueued, False otherwise.
         """
         with self.lock:
-            # if not should_enqueue(url):
-            #     logger.debug(f"enqueue: blocked by policy: {url}")
-            #     return False  # Block URL based on centralized policy
+            if not should_enqueue(url):
+                logger.info(f"enqueue: blocked by policy: {url}")
+                return False  # Block URL based on centralized policy
             normalized_url = normalize_url(url)
             if normalized_url in self.visited:
-                logger.debug(f"enqueue: already visited: {normalized_url}")
+                logger.info(f"enqueue: skipped (already visited): {normalized_url}")
                 return False
             if normalized_url in self.in_progress:
-                logger.debug(f"enqueue: already in_progress/reserved: {normalized_url}")
+                logger.info(f"enqueue: skipped (already in progress): {normalized_url}")
                 return False
             # reserve immediately
             self.in_progress.add(normalized_url)
@@ -110,7 +107,7 @@ class Frontier:
                     logger.debug(f"enqueue: failed to record routing for parent {discovered_from} -> {url}")
             # Record assets if any
             # Note: Assets are not enqueued, just recorded
-            logger.debug(f"enqueue: queued {normalized_url} (depth={depth}) qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
+            logger.info(f"enqueue: successfully queued {normalized_url} (depth={depth}, discovered_from={discovered_from}) qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
             return True
 
     def dequeue(self):

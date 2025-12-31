@@ -13,8 +13,7 @@ from crawler.storage.db import get_connection
 def fetch(url, discovered_from=None, depth=0):
     """
     Fetch a URL, classify outcome, record to DB.
-    Returns the requests.Response on success, or None otherwise.
-    Always records to DB.
+    Returns a dict with 'success', 'response' or 'error'.
     """
     start_time = time.time()
     domain = urlparse(url).netloc
@@ -35,28 +34,28 @@ def fetch(url, discovered_from=None, depth=0):
             if "text/html" in ct or "application/json" in ct:
                 # Success
                 # _record_to_db(url, domain, "success", r.status_code, ct, response_size, fetch_time_ms, None, discovered_from, depth)
-                return r
+                return {'success': True, 'response': r}
             else:
                 # Ignored
                 # _record_to_db(url, domain, "ignored", r.status_code, ct, response_size, fetch_time_ms, None, discovered_from, depth)
-                return None
+                return {'success': False, 'error': f'ignored content type: {ct}'}
         else:
             # Fetch failed
             # _record_to_db(url, domain, "fetch_failed", r.status_code, ct, response_size, fetch_time_ms, "http_error", discovered_from, depth)
-            return None
+            return {'success': False, 'error': f'http error: {r.status_code}'}
 
     except requests.exceptions.Timeout:
         fetch_time_ms = int((time.time() - start_time) * 1000)
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "timeout", discovered_from, depth)
-        return None
+        return {'success': False, 'error': 'timeout'}
     except requests.exceptions.ConnectionError:
         fetch_time_ms = int((time.time() - start_time) * 1000)
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "connection_error", discovered_from, depth)
-        return None
+        return {'success': False, 'error': 'connection error'}
     except requests.exceptions.RequestException as e:
         fetch_time_ms = int((time.time() - start_time) * 1000)
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "request_error", discovered_from, depth)
-        return None
+        return {'success': False, 'error': str(e)}
 
 def _record_to_db(url, domain, status, http_status, content_type, response_size, fetch_time_ms, error_type, discovered_from, depth):
     """

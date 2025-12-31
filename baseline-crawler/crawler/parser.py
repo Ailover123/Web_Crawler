@@ -24,10 +24,10 @@ def classify_url(url):
     if any(pat in url_lower for pat in ['/uploads/', '/assets/', '/wp-content/uploads/', '/media/', '/files/']):
         types.add('assets_uploads')
 
-    # Media: file extensions
+    # Media: file extensions (merged into assets)
     media_exts = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg']
     if any(path.endswith(ext) for ext in media_exts):
-        types.add('media')
+        types.add('assets_uploads')
 
     # Scripts styles: CSS and JS
     if path.endswith('.css') or path.endswith('.js'):
