@@ -6,7 +6,13 @@ from pathlib import Path
 
 # Initial URLs to start crawling from (MANDATORY)
 SEED_URLS = [
+<<<<<<< Updated upstream
     "https://worldpeoplesolutions.com/"
+=======
+     "https://worldpeoplesolutions.com/",
+   # "https://sitewall.net/",
+   #"http#s://uat.pagentra.com/"
+>>>>>>> Stashed changes
 ]
 
 # Maximum crawl depth
