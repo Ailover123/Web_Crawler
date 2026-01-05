@@ -79,6 +79,16 @@ def utc_to_ist(utc_str):
     except:
         return utc_str
 
+def load_crawl_data():
+    """
+    Load crawl data from crawl_data.json.
+    """
+    crawl_data_file = Path("crawl_data.json")
+    if crawl_data_file.exists():
+        with open(crawl_data_file, 'r') as f:
+            return json.load(f)
+    return None
+
 def main():
     st.title("Baseline Crawler Analysis Dashboard")
 
@@ -100,6 +110,45 @@ def main():
     # Display current analysis
     st.header(f"Analysis for {selected_domain}")
     st.metric("Total URLs", data["total_urls"])
+
+    # Display crawl data table
+    st.header("Crawl Data")
+    crawl_data = load_crawl_data()
+    if crawl_data:
+        df_crawl = pd.DataFrame(crawl_data)
+        df_crawl['domain'] = selected_domain  # Add domain column
+        # Filter successful and failed URLs
+        df_success = df_crawl[df_crawl['status'] == 'success']
+        df_failed = df_crawl[df_crawl['status'] == 'failure']
+
+        # Display successful URLs
+        st.subheader("Successful Crawls")
+        if not df_success.empty:
+            df_success_display = df_success[['sr_no', 'worker', 'url', 'memory', 'size', 'speed', 'status', 'domain']].copy()
+            df_success_display = df_success_display.rename(columns={
+                'memory': 'memory (MB)',
+                'size': 'size (bytes)',
+                'speed': 'speed (ms)'
+            })
+            st.dataframe(df_success_display, width='stretch')
+        else:
+            st.info("No successful crawls.")
+
+        # Display failed URLs with reasons
+        st.subheader("Failed Crawls")
+        if not df_failed.empty:
+            df_failed_display = df_failed[['sr_no', 'worker', 'url', 'memory', 'size', 'speed', 'status', 'reason', 'domain']].copy()
+            df_failed_display = df_failed_display.rename(columns={
+                'memory': 'memory (MB)',
+                'size': 'size (bytes)',
+                'speed': 'speed (ms)',
+                'reason': 'failure reason'
+            })
+            st.dataframe(df_failed_display, width='stretch')
+        else:
+            st.info("No failed crawls.")
+    else:
+        st.info("No crawl data available. Run the crawler to generate data.")
 
     # Classifications chart
     classifications = {k: v["count"] for k, v in data["distribution"].items()}
