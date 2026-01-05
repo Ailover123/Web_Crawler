@@ -45,19 +45,31 @@ def classify_url(url):
 
 def extract_urls(html, base_url):
     """
-    Extract URLs from HTML, including navigational and assets, filter to same domain, http/https.
-    Returns list of absolute URLs to crawl and assets.
+    Extract URLs from HTML, separating navigational links from assets.
+    Assets (PDFs, images, media files) are NOT enqueued for crawling.
+    Returns: (urls_to_crawl, asset_urls)
     """
     soup = BeautifulSoup(html, 'html.parser')
     base_domain = urlparse(base_url).netloc
     urls = []
     assets = []
+    
+    # Asset extensions that should never be crawled
+    ASSET_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', 
+                        '.ico', '.bmp', '.tiff', '.mp4', '.mp3', '.avi', '.mov', 
+                        '.zip', '.rar', '.tar', '.gz', '.7z', '.doc', '.docx', 
+                        '.xls', '.xlsx', '.ppt', '.pptx'}
 
     # Extract from <a href>
     for a in soup.find_all('a', href=True):
         url = urljoin(base_url, a['href'])
         if _is_allowed_url(url, base_domain):
-            urls.append(url)
+            # Check if URL is an asset (by extension)
+            path_lower = urlparse(url).path.lower()
+            if any(path_lower.endswith(ext) for ext in ASSET_EXTENSIONS):
+                assets.append(url)  # Asset link - store but don't crawl
+            else:
+                urls.append(url)  # Regular page - crawl it
 
     # Extract assets from <img src>
     for img in soup.find_all('img', src=True):
