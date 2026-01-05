@@ -7,11 +7,15 @@ import threading
 from crawler.fetcher import fetch
 from crawler.parser import extract_urls
 from crawler.normalizer import normalize_url
-from crawler.storage.db import get_connection
+from crawler.storage.db import get_connection, get_failed_connection
+from crawler.metrics import get_metrics
 import time
 import json
 from urllib.parse import urlparse
 from datetime import datetime, timezone
+import psutil
+import os
+import tracemalloc
 
 class Worker(threading.Thread):
     """
@@ -24,6 +28,13 @@ class Worker(threading.Thread):
         super().__init__(name=name)
         self.frontier = frontier
         self.running = True
+        self.sr_no = 0
+        self.crawl_data = []
+        # Per-worker CPU and memory tracking
+        self.cpu_percent_samples = []
+        self.memory_usage_samples = []
+        self.process = psutil.Process(os.getpid())
+        tracemalloc.start()
 
     def run(self):
         """
@@ -41,52 +52,94 @@ class Worker(threading.Thread):
 
             print(f"[WORKER-{self.name}] dequeued:", url)
 
+            # Capture CPU and memory at start of processing
+            cpu_start = self.process.cpu_percent(interval=None)
+            mem_start = self.process.memory_info().rss / 1024 / 1024
+
             try:
-                print(f"[FETCH] {url}")
-                # Fetch
+                # Fetch with timing
+                fetch_start = time.time()
                 fetch_result = fetch(url, discovered_from, depth)
+                fetch_time = time.time() - fetch_start
                 domain = urlparse(url).netloc
                 timestamp = datetime.now(timezone.utc).isoformat()
                 if fetch_result['success']:
                     response = fetch_result['response']
-                    # Parse and enqueue new URLs and record assets
+                    # Parse with timing
+                    parse_start = time.time()
                     html = response.text
                     new_urls, assets = extract_urls(html, url)
+                    parse_time = time.time() - parse_start
+                    # Memory measurement after processing
+                    mem_end = self.process.memory_info().rss / 1024 / 1024
+                    memory = mem_end
+                    size = len(response.content)
+                    # Calculate crawl_time as total time for fetch + parse + db
+                    crawl_time = fetch_time + parse_time
+                    self.sr_no += 1
+                    domain = urlparse(url).netloc
+                    
+                    # Record CPU and memory samples
+                    cpu_end = self.process.cpu_percent(interval=0.1)
+                    self.cpu_percent_samples.append(cpu_end)
+                    self.memory_usage_samples.append(mem_end - mem_start)
+                    
+                    # Record and print metrics
+                    metrics = get_metrics()
+                    metrics.record_url(url, domain, 'success', size, crawl_time, memory, self.name)
+                    metrics.print_url_row(url, domain, 'success', size, crawl_time, memory, self.name)
+                    
                     for new_url in new_urls:
-                        ok = self.frontier.enqueue(new_url, url, depth + 1)
-                        if not ok:
-                            print(f"[WORKER-{self.name}] enqueue rejected: {new_url}")
-                        else:
-                            print(f"[WORKER-{self.name}] enqueued: {new_url}")
-                    # Record assets in routing graph
-                    normalized_parent = normalize_url(url)
-                    if normalized_parent not in self.frontier.routing_graph:
-                        self.frontier.routing_graph[normalized_parent] = []
-                    for asset in assets:
-                        normalized_asset = normalize_url(asset)
-                        if normalized_asset not in self.frontier.routing_graph[normalized_parent]:
-                            self.frontier.routing_graph[normalized_parent].append(normalized_asset)
+                        self.frontier.enqueue(new_url, url, depth + 1)
+                    
+                    # Record assets found on this page (PDFs, images, media in HTML tags)
+                    if assets:
+                        self.frontier.record_assets(url, assets)
+                    # Note: routing_graph recording removed to save memory
 
-                    # Record to domain-specific DB
+                    # Record to domain-specific DB with timing
+                    db_start = time.time()
                     conn = get_connection(domain)
                     cursor = conn.cursor()
                     cursor.execute("""
                         INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (domain, url, discovered_from, json.dumps(new_urls), response.status_code, 0.0, len(response.content), timestamp))
+                    """, (domain, url, discovered_from, json.dumps(new_urls), response.status_code, crawl_time, size, timestamp))
                     conn.commit()
                     conn.close()
+                    db_time = time.time() - db_start
+                    # Add db_time to crawl_time
+                    crawl_time += db_time
                 else:
+                    memory = 0  # or measure
+                    size = 0
+                    self.sr_no += 1
+                    domain = urlparse(url).netloc
+                    error_reason = fetch_result['error']
+                    fetch_status = fetch_result.get('status', 'failed')  # 'skipped', 'not_found', or 'failed'
+                    
+                    # Record CPU and memory samples for failures too
+                    cpu_end = self.process.cpu_percent(interval=0.1)
+                    mem_end = self.process.memory_info().rss / 1024 / 1024
+                    self.cpu_percent_samples.append(cpu_end)
+                    self.memory_usage_samples.append(max(0, mem_end - mem_start))
+                    
+                    # Record and print metrics
+                    metrics = get_metrics()
+                    metrics.record_url(url, domain, fetch_status, size, fetch_time, memory, self.name, error_reason)
+                    metrics.print_url_row(url, domain, fetch_status, size, fetch_time, memory, self.name, error_reason)
+                    
                     # Record failed fetch
+                    db_start = time.time()
                     conn = get_connection(domain)
                     cursor = conn.cursor()
                     cursor.execute("""
                         INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (domain, url, discovered_from, json.dumps([]), 0, 0.0, 0, timestamp))
+                    """, (domain, url, discovered_from, json.dumps([]), 0, fetch_time, 0, timestamp))
                     conn.commit()
                     conn.close()
-                    print(f"[WORKER-{self.name}] fetch failed for {url}: {fetch_result['error']}")
+                    db_time = time.time() - db_start
             except Exception as e:
                 # Log the exception to prevent silent failures that cause crawler to hang
                 print(f"[WORKER-{self.name}] Error processing {url}: {e}")
