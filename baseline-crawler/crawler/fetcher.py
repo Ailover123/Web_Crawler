@@ -36,26 +36,30 @@ def fetch(url, discovered_from=None, depth=0):
                 # _record_to_db(url, domain, "success", r.status_code, ct, response_size, fetch_time_ms, None, discovered_from, depth)
                 return {'success': True, 'response': r}
             else:
-                # Ignored
-                # _record_to_db(url, domain, "ignored", r.status_code, ct, response_size, fetch_time_ms, None, discovered_from, depth)
-                return {'success': False, 'error': f'ignored content type: {ct}'}
+                # Skipped - assets/media that we don't crawl
+                # _record_to_db(url, domain, "skipped", r.status_code, ct, response_size, fetch_time_ms, None, discovered_from, depth)
+                return {'success': False, 'error': f'skipped: {ct}', 'status': 'skipped'}
+        elif r.status_code == 404:
+            # Not Found - page doesn't exist
+            # _record_to_db(url, domain, "not_found", r.status_code, ct, response_size, fetch_time_ms, "not_found", discovered_from, depth)
+            return {'success': False, 'error': 'not found (404)', 'status': 'not_found'}
         else:
-            # Fetch failed
+            # Fetch failed - other HTTP errors
             # _record_to_db(url, domain, "fetch_failed", r.status_code, ct, response_size, fetch_time_ms, "http_error", discovered_from, depth)
-            return {'success': False, 'error': f'http error: {r.status_code}'}
+            return {'success': False, 'error': f'http error: {r.status_code}', 'status': 'failed'}
 
     except requests.exceptions.Timeout:
         fetch_time_ms = int((time.time() - start_time) * 1000)
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "timeout", discovered_from, depth)
-        return {'success': False, 'error': 'timeout'}
+        return {'success': False, 'error': 'timeout', 'status': 'failed'}
     except requests.exceptions.ConnectionError:
         fetch_time_ms = int((time.time() - start_time) * 1000)
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "connection_error", discovered_from, depth)
-        return {'success': False, 'error': 'connection error'}
+        return {'success': False, 'error': 'connection error', 'status': 'failed'}
     except requests.exceptions.RequestException as e:
         fetch_time_ms = int((time.time() - start_time) * 1000)
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "request_error", discovered_from, depth)
-        return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': str(e), 'status': 'failed'}
 
 def _record_to_db(url, domain, status, http_status, content_type, response_size, fetch_time_ms, error_type, discovered_from, depth):
     """
