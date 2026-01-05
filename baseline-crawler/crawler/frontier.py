@@ -9,6 +9,8 @@ from queue import Queue
 from threading import Lock
 from urllib.parse import urlparse
 import logging
+import psutil
+import os
 from crawler.normalizer import normalize_url
 from crawler.parser import classify_url
 
@@ -26,7 +28,10 @@ def should_enqueue(url: str) -> bool:
         logger.info(f"Rejected URL: {url}, reason: non-HTTP scheme ({parsed.scheme})")
         return False
 
-    # Allow URLs with fragments (removed blockage)
+    # Reject URLs with fragments (#)
+    if parsed.fragment:
+        logger.info(f"Rejected URL: {url}, reason: contains fragment ({parsed.fragment})")
+        return False
 
     path = parsed.path.lower()
 
@@ -38,11 +43,11 @@ def should_enqueue(url: str) -> bool:
 
     url_lower = url.lower()
 
-    # Allow URLs containing specific substrings (CMS URLs)
-    allowed_substrings = ['elementor', 'wp-content/uploads', 'wp-includes', 'wp-json', 'off_canvas', 'addtoany']
-    if any(substring in url_lower for substring in allowed_substrings):
-        logger.info(f"Allowed URL: {url}, reason: contains CMS substring")
-        # Allow CMS URLs to be enqueued
+    # Reject URLs containing blocked substrings
+    blocked_substrings = ['canvas', 'elementor']
+    if any(substring in url_lower for substring in blocked_substrings):
+        logger.info(f"Rejected URL: {url}, reason: contains blocked substring")
+        return False
 
     return True  # Allow if no rejections match
 
@@ -59,7 +64,7 @@ class Frontier:
         self.in_progress = set()  # URLs currently being fetched
         self.discovered = set()  # All URLs discovered
         self.classifications = {}  # URL classifications
-        self.routing_graph = {}  # parent -> list of children
+        self.assets = {}  # Assets discovered: {source_url: set(unique_asset_urls)} - DEDUPED with set!
         self.lock = Lock()  # Single lock for atomic operations
 
     def enqueue(self, url, discovered_from=None, depth=0):
@@ -95,16 +100,7 @@ class Frontier:
                 self.classifications[normalized_url] = classify_url(url)
             except Exception:
                 logger.debug(f"enqueue: classify_url failed for {url}")
-            # Record routing: discovered_from -> normalized_url
-            if discovered_from:
-                try:
-                    normalized_parent = normalize_url(discovered_from)
-                    if normalized_parent not in self.routing_graph:
-                        self.routing_graph[normalized_parent] = []
-                    if normalized_url not in self.routing_graph[normalized_parent]:
-                        self.routing_graph[normalized_parent].append(normalized_url)
-                except Exception:
-                    logger.debug(f"enqueue: failed to record routing for parent {discovered_from} -> {url}")
+            # Note: routing_graph removed to reduce memory footprint for smaller crawls
             # Record assets if any
             # Note: Assets are not enqueued, just recorded
             logger.info(f"enqueue: successfully queued {normalized_url} (depth={depth}, discovered_from={discovered_from}) qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
@@ -121,7 +117,26 @@ class Frontier:
             return item
         except Exception:
             return None
-
+    def record_assets(self, source_url, asset_urls):
+        """
+        Record unique assets found on a page (PDFs, images, docs only).
+        Uses set to automatically deduplicate assets across pages.
+        """
+        with self.lock:
+            normalized_source = normalize_url(source_url)
+            if asset_urls:
+                # Filter to only: PDFs, images, and documents (skip everything else)
+                ASSET_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp',
+                                   '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'}
+                filtered_assets = [url for url in asset_urls 
+                                  if any(url.lower().endswith(ext) for ext in ASSET_EXTENSIONS)]
+                
+                if filtered_assets:
+                    if normalized_source not in self.assets:
+                        self.assets[normalized_source] = set()  # Use SET for deduplication!
+                    # Add only PDFs, images, docs (duplicates automatically ignored by set)
+                    self.assets[normalized_source].update(filtered_assets)
+                    logger.info(f"record_assets: stored {len(filtered_assets)} assets from {normalized_source}")
     def mark_visited(self, url):
         """
         Mark a URL as visited and remove from in-progress.
@@ -158,4 +173,33 @@ class Frontier:
             'queue_size': self.queue.qsize(),
             'visited_count': len(self.visited),
             'in_progress_count': len(self.in_progress)
+        }
+
+    def get_memory_stats(self):
+        """
+        Return memory stats for frontier structures.
+        """
+        process = psutil.Process(os.getpid())
+        total_memory = process.memory_info().rss / 1024 / 1024  # MB
+        # Approximate memory per structure (rough estimates)
+        queue_memory = self.queue.qsize() * 0.1  # ~100 bytes per item
+        visited_memory = len(self.visited) * 0.05  # ~50 bytes per URL string
+        in_progress_memory = len(self.in_progress) * 0.05
+        discovered_memory = len(self.discovered) * 0.05
+        classifications_memory = len(self.classifications) * 0.1  # dict with sets (2x because stores set objects)
+        # Count unique assets across all pages
+        total_unique_assets = len(set().union(*self.assets.values())) if self.assets else 0
+        assets_memory = total_unique_assets * 0.05  # ~50 bytes per unique asset URL
+        routing_graph_memory = 0  # Removed from memory to save space
+        frontier_memory = queue_memory + visited_memory + in_progress_memory + discovered_memory + classifications_memory + assets_memory
+        return {
+            'total_process_memory_mb': total_memory,
+            'frontier_memory_mb': frontier_memory,
+            'queue_memory_mb': queue_memory,
+            'visited_memory_mb': visited_memory,
+            'in_progress_memory_mb': in_progress_memory,
+            'discovered_memory_mb': discovered_memory,
+            'classifications_memory_mb': classifications_memory,
+            'assets_memory_mb': assets_memory,
+            'total_unique_assets': total_unique_assets
         }
