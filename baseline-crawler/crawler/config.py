@@ -7,12 +7,13 @@ from pathlib import Path
 # Initial URLs to start crawling from (MANDATORY)
 SEED_URLS = [
      "https://worldpeoplesolutions.com/",
-     #"https://sitewall.net/",
-    #"https://uat.pagentra.com/"
+     "https://sitewall.net/",
+   # "https://uat.pagentra.com/"
 ]
 
 # Network timeout for HTTP requests (seconds)
-REQUEST_TIMEOUT = 10
+# Increased from 10s to 25s to handle slow media/pagination requests
+REQUEST_TIMEOUT = 25
 
 # User-Agent string for crawler identification
 USER_AGENT = "BaselineCrawler/1.0"
@@ -27,5 +28,8 @@ except NameError:
     DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
 
 # Worker scaling parameters
+# IMPORTANT: MAX_WORKERS should NOT exceed available logical processors
+# Your system: 6 physical cores, 12 logical processors (with hyperthreading)
+# Optimal setting: 6 (matches physical cores, prevents CPU over-capacity)
 MIN_WORKERS = 5
-MAX_WORKERS = 50
+MAX_WORKERS = 6
