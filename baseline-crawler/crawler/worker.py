@@ -20,6 +20,7 @@ from crawler.fetcher import fetch
 from crawler.parser import extract_urls
 from crawler.storage.db import get_connection
 from crawler.metrics import get_metrics
+from crawler.normalizer import normalize_url
 
 
 class Worker(threading.Thread):
@@ -104,7 +105,7 @@ class Worker(threading.Thread):
                         INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (domain, url, discovered_from, json.dumps(new_urls), response.status_code, crawl_time, size, timestamp),
+                        (domain, normalize_url(url), discovered_from, json.dumps(new_urls), response.status_code, crawl_time, size, timestamp),
                     )
                     conn.commit()
                     conn.close()
@@ -139,7 +140,7 @@ class Worker(threading.Thread):
                         INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (domain, url, discovered_from, json.dumps([]), 0, fetch_time, 0, timestamp),
+                        (domain, normalize_url(url), discovered_from, json.dumps([]), 0, fetch_time, 0, timestamp),
                     )
                     conn.commit()
                     conn.close()
