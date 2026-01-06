@@ -7,6 +7,8 @@ __pycache__/
 
 # Virtual environment
 venv/
+.venv/
+.venv
 .env
 
 # OS files
