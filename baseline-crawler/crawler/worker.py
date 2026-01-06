@@ -3,12 +3,11 @@ Worker thread for the crawler.
 Each worker fetches a URL, parses it, enqueues new URLs, and marks as visited.
 """
 
+import sys
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 import threading
-from crawler.fetcher import fetch
-from crawler.parser import extract_urls
-from crawler.normalizer import normalize_url
-from crawler.storage.db import get_connection, get_failed_connection
-from crawler.metrics import get_metrics
 import time
 import json
 from urllib.parse import urlparse
@@ -17,11 +16,15 @@ import psutil
 import os
 import tracemalloc
 
+from crawler.fetcher import fetch
+from crawler.parser import extract_urls
+from crawler.storage.db import get_connection
+from crawler.metrics import get_metrics
+
+
 class Worker(threading.Thread):
     """
-    Crawler worker thread.
-    Runs in a loop: dequeue URL, fetch, parse, enqueue new URLs, mark visited.
-    Exits when no more URLs and queue empty.
+    Crawler worker thread: dequeue URL, fetch, parse, enqueue, and mark visited.
     """
 
     def __init__(self, frontier, name="Worker"):
@@ -37,9 +40,6 @@ class Worker(threading.Thread):
         tracemalloc.start()
 
     def run(self):
-        """
-        Main worker loop.
-        """
         print(f"[WORKER-{self.name}] started")
         while self.running:
             item = self.frontier.dequeue()
@@ -86,25 +86,26 @@ class Worker(threading.Thread):
                     
                     # Record and print metrics
                     metrics = get_metrics()
-                    metrics.record_url(url, domain, 'success', size, crawl_time, memory, self.name)
-                    metrics.print_url_row(url, domain, 'success', size, crawl_time, memory, self.name)
-                    
+                    metrics.record_url(url, domain, "success", size, crawl_time, memory, self.name)
+                    metrics.print_url_row(url, domain, "success", size, crawl_time, memory, self.name)
+
                     for new_url in new_urls:
                         self.frontier.enqueue(new_url, url, depth + 1)
                     
                     # Record assets found on this page (PDFs, images, media in HTML tags)
                     if assets:
                         self.frontier.record_assets(url, assets)
-                    # Note: routing_graph recording removed to save memory
 
-                    # Record to domain-specific DB with timing
                     db_start = time.time()
                     conn = get_connection(domain)
                     cursor = conn.cursor()
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (domain, url, discovered_from, json.dumps(new_urls), response.status_code, crawl_time, size, timestamp))
+                        """,
+                        (domain, url, discovered_from, json.dumps(new_urls), response.status_code, crawl_time, size, timestamp),
+                    )
                     conn.commit()
                     conn.close()
                     db_time = time.time() - db_start
@@ -133,10 +134,13 @@ class Worker(threading.Thread):
                     db_start = time.time()
                     conn = get_connection(domain)
                     cursor = conn.cursor()
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (domain, url, discovered_from, json.dumps([]), 0, fetch_time, 0, timestamp))
+                        """,
+                        (domain, url, discovered_from, json.dumps([]), 0, fetch_time, 0, timestamp),
+                    )
                     conn.commit()
                     conn.close()
                     db_time = time.time() - db_start
@@ -155,7 +159,4 @@ class Worker(threading.Thread):
                 traceback.print_exc()
 
     def stop(self):
-        """
-        Stop the worker.
-        """
         self.running = False
