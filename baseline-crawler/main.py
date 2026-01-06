@@ -42,7 +42,7 @@ def get_db_stats(domains):
 def main():
     # Initialize metrics system
     metrics = reset_metrics()
-    
+
     # Extract unique domains from seed URLs
     domains = set()
     for seed_url in SEED_URLS:
@@ -75,7 +75,7 @@ def main():
 
     # Start workers
     workers = []
-    num_workers = MIN_WORKERS  
+    num_workers = MIN_WORKERS
     for i in range(num_workers):
         worker = Worker(frontier, name=f"Worker-{i}")
         worker.start()
@@ -115,34 +115,34 @@ def main():
     print("\n" + "="*100)
     print("CHECKING FOR TIMEOUT FAILURES TO RETRY")
     print("="*100)
-    
+
     # Collect timeout failures from metrics
-    timeout_urls = [record for record in metrics.url_records 
+    timeout_urls = [record for record in metrics.url_records
                     if record['status'] == 'failed' and 'timeout' in record.get('error', '').lower()]
-    
+
     if timeout_urls:
         print(f"\n Found {len(timeout_urls)} timeout failures. Retrying with 2 workers...\n")
-        
+
         # Re-enqueue timeout URLs
         for record in timeout_urls:
             frontier.enqueue(record['url'], record.get('discovered_from'), 0)
-        
+
         # Start 2 retry workers
         retry_workers = []
         for i in range(2):
             worker = Worker(frontier, name=f"Retry-{i}")
             worker.start()
             retry_workers.append(worker)
-        
+
         # Wait for retry completion
         while not frontier.is_empty():
             time.sleep(1)
-        
+
         # Stop retry workers
         for worker in retry_workers:
             worker.stop()
             worker.join()
-        
+
         print(f"\n Retry phase completed\n")
     else:
         print(f"\n No timeout failures found. Skipping retry phase.\n")
