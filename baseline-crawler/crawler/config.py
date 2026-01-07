@@ -12,11 +12,11 @@ SEED_URLS = [
 ]
 
 # Network timeout for HTTP requests (seconds)
-# Increased to give slow pages more room before marking as timeout
+ # Increased to give slow pages more room before marking as timeout
 REQUEST_TIMEOUT = 35
 
 # User-Agent string for crawler identification
-USER_AGENT = "BaselineCrawler/1.0"
+USER_AGENT = "Chrome/126.0.0.0"
 
 # Canonical data directory for the crawler. Set to the `data` folder
 # located inside the `baseline-crawler` package.
@@ -38,7 +38,7 @@ MAX_WORKERS = 6
 DB_CONFIG = {
     'host': 'localhost',
     'user': 'root',
-    'password': '',  # Change this to your MySQL password
+    'password': '',  
     'database': 'crawlerdb',
     'autocommit': False,
     'charset': 'utf8mb4',
