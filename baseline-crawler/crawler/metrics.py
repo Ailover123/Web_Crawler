@@ -67,9 +67,12 @@ class CrawlerMetrics:
         # Resource tracking
         self.process = psutil.Process(os.getpid())
         self.initial_memory_mb = self.process.memory_info().rss / 1024 / 1024
+
+        # DB writer failures (batch-level)
+        self.db_batch_failures = []
         
     def record_url(self, url, domain, status, size_bytes, fetch_time_sec, 
-                   memory_mb, worker_name, error_reason=None):
+                   memory_mb, worker_name, error_reason=None, is_retry=False):
         """
         Record metrics for a single URL crawl.
         
@@ -82,8 +85,60 @@ class CrawlerMetrics:
             memory_mb: Memory consumption in MB
             worker_name: Name of worker thread
             error_reason: Reason for failure (if status='failure')
+            is_retry: If True, update existing record instead of creating new one
         """
         with self.lock:
+            # For retries, find and update existing record
+            if is_retry:
+                existing_record = next((r for r in self.url_records if r['url'] == url), None)
+                if existing_record:
+                    # Update existing record without changing serial number
+                    old_status = existing_record['status']
+                    existing_record['status'] = status
+                    existing_record['size_bytes'] = size_bytes
+                    existing_record['fetch_time_sec'] = fetch_time_sec
+                    existing_record['memory_mb'] = memory_mb
+                    existing_record['worker'] = worker_name
+                    existing_record['error_reason'] = error_reason
+                    existing_record['timestamp'] = datetime.now()
+                    
+                    # Update worker stats (decrement old, increment new)
+                    ws = self.worker_stats[worker_name]
+                    ws['urls_fetched'] += 1
+                    if old_status == 'failed':
+                        ws['failed_count'] -= 1
+                    if status == 'success':
+                        ws['success_count'] += 1
+                    elif status == 'failed':
+                        ws['failed_count'] += 1
+                    
+                    # Update domain stats
+                    ds = self.domain_stats[domain]
+                    if old_status == 'failed':
+                        ds['failed_count'] -= 1
+                    if status == 'success':
+                        ds['success_count'] += 1
+                    elif status == 'failed':
+                        ds['failed_count'] += 1
+                    ds['total_size_bytes'] += size_bytes
+                    ds['total_fetch_time'] += fetch_time_sec
+                    ds['max_memory_mb'] = max(ds['max_memory_mb'], memory_mb)
+                    
+                    # Update overall stats
+                    if old_status == 'failed':
+                        self.overall_stats['failed_count'] -= 1
+                    if status == 'success':
+                        self.overall_stats['success_count'] += 1
+                    elif status == 'failed':
+                        self.overall_stats['failed_count'] += 1
+                    self.overall_stats['total_size_bytes'] += size_bytes
+                    self.overall_stats['total_fetch_time'] += fetch_time_sec
+                    self.overall_stats['peak_memory_mb'] = max(
+                        self.overall_stats['peak_memory_mb'], memory_mb
+                    )
+                    return  # Exit early after updating
+            
+            # Not a retry or record not found - create new record
             self.url_counter += 1
             
             # Create URL record
@@ -145,6 +200,16 @@ class CrawlerMetrics:
             self.overall_stats['peak_memory_mb'] = max(
                 self.overall_stats['peak_memory_mb'], memory_mb
             )
+    
+            def record_db_batch_failure(self, reason: str, attempts: int, batch_size: int):
+                """Track DB writer batch failures for end-of-crawl summary."""
+                with self.lock:
+                    self.db_batch_failures.append({
+                        'reason': reason,
+                        'attempts': attempts,
+                        'batch_size': batch_size,
+                        'timestamp': datetime.now(),
+                    })
     
     def print_url_row(self, url, domain, status, size_bytes, fetch_time_sec, 
                       memory_mb, worker_name, error_reason=None):
@@ -311,6 +376,13 @@ class CrawlerMetrics:
         print(f"   Total Data Fetched:    {total_mb:.2f} MB ({self.overall_stats['total_size_bytes']:,} bytes)")
         print(f"   Avg per URL:           {self.overall_stats['total_size_bytes'] / max(1, self.overall_stats['total_urls']) / 1024:.2f} KB")
         print(f"   Throughput:            {total_mb / max(0.001, elapsed):.2f} MB/s")
+
+        # DB writer failures (if any)
+        if self.db_batch_failures:
+            print(f"\nDB WRITER FAILURES: {len(self.db_batch_failures)} batch(es) failed after retries")
+            for idx, fail in enumerate(self.db_batch_failures, start=1):
+                ts = fail['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
+                print(f"   {idx}. {ts} | attempts={fail['attempts']} | batch_size={fail['batch_size']} | reason={fail['reason']}")
         
         # Memory metrics (for scaling)
         print(f"\nMEMORY CONSUMPTION (for scaling):")
@@ -324,7 +396,6 @@ class CrawlerMetrics:
         print(f"     - Visited Set:       {frontier_memory_stats['visited_memory_mb']:.2f} MB")
         print(f"     - In-Progress Set:   {frontier_memory_stats['in_progress_memory_mb']:.2f} MB")
         print(f"     - Discovered Set:    {frontier_memory_stats['discovered_memory_mb']:.2f} MB")
-        print(f"     - Classifications:   {frontier_memory_stats['classifications_memory_mb']:.2f} MB (stores set objects, 2x URL size)")
         print(f"     - Media Assets:      {frontier_memory_stats['assets_memory_mb']:.2f} MB ({frontier_memory_stats['total_unique_assets']} unique media files)")
         print(f"       (PDFs, images, docs - deduplicated across all pages, CSS/JS excluded)")
         
@@ -497,6 +568,8 @@ class CrawlerMetrics:
                           maxcolwidths=[80, 30, 15]))
         
         print("\n" + "="*100)
+        import sys
+        sys.stdout.flush()
 
 
 # Global metrics instance
