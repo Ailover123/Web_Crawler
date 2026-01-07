@@ -10,7 +10,6 @@ from urllib3.util.retry import Retry
 import time
 from urllib.parse import urlparse
 from crawler.config import USER_AGENT, REQUEST_TIMEOUT
-from crawler.storage.db import get_connection
 
 # Shared session with retry/backoff to smooth over transient slowdowns without growing memory usage.
 _session = requests.Session()
@@ -79,27 +78,3 @@ def fetch(url, discovered_from=None, depth=0):
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "request_error", discovered_from, depth)
         print(f"[fetch] request error after {fetch_time_ms}ms: {url} -> {e}")
         return {'success': False, 'error': str(e), 'status': 'failed'}
-
-def _record_to_db(url, domain, status, http_status, content_type, response_size, fetch_time_ms, error_type, discovered_from, depth):
-    """
-    Record the fetch result to the database using UPSERT for idempotency.
-    """
-    print(f"[DB] recording: {url}")
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO urls (url, domain, status, http_status, content_type, response_size, fetch_time_ms, error_type, discovered_from, depth, crawled_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-        ON DUPLICATE KEY UPDATE
-            status=VALUES(status),
-            http_status=VALUES(http_status),
-            content_type=VALUES(content_type),
-            response_size=VALUES(response_size),
-            fetch_time_ms=VALUES(fetch_time_ms),
-            error_type=VALUES(error_type),
-            discovered_from=VALUES(discovered_from),
-            depth=VALUES(depth),
-            crawled_at=VALUES(crawled_at);
-    """, (url, domain, status, http_status, content_type, response_size, fetch_time_ms, error_type, discovered_from, depth))
-    conn.commit()
-    conn.close()
