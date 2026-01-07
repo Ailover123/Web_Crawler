@@ -1,8 +1,4 @@
-"""
-Worker thread for the crawler.
-Each worker fetches a URL, parses it, enqueues new URLs, and marks as visited.
-"""
-
+"""Replace entire worker.py with deadlock-safe version"""
 import sys
 import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -10,8 +6,10 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 import threading
 import time
 import json
+from queue import Queue, Empty
 from urllib.parse import urlparse
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import psutil
 import os
 import tracemalloc
@@ -23,135 +21,243 @@ from crawler.metrics import get_metrics
 from crawler.normalizer import normalize_url
 
 
+# Batching and retry settings for DB writes
+DB_WRITE_QUEUE = Queue(maxsize=2000)
+BATCH_SIZE = 50
+FLUSH_INTERVAL = 1.0  # seconds
+MAX_RETRIES = 2  # retries beyond the first attempt
+
+
+class DBWriter(threading.Thread):
+    """Background writer to batch DB inserts and cut contention."""
+
+    def __init__(self):
+        super().__init__(name="DBWriter", daemon=True)
+        self.buffer = []
+        self.last_flush = time.time()
+        self.running = True
+
+    def run(self):
+        while self.running:
+            try:
+                task = DB_WRITE_QUEUE.get(timeout=0.5)
+                if task is None:  # sentinel
+                    self._flush()
+                    continue
+                self.buffer.append(task)
+            except Empty:
+                pass
+
+            now = time.time()
+            if len(self.buffer) >= BATCH_SIZE or (self.buffer and now - self.last_flush >= FLUSH_INTERVAL):
+                self._flush()
+
+        # Final flush when stopping
+        self._flush()
+
+    def stop(self):
+        self.running = False
+        DB_WRITE_QUEUE.put(None)
+
+    def _flush(self):
+        if not self.buffer:
+            return
+
+        batch = self.buffer
+        self.buffer = []
+        self.last_flush = time.time()
+
+        attempt = 0
+        while attempt <= MAX_RETRIES:
+            conn = None
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                for task in batch:
+                    self._ensure_site_record(cursor, task["url_key"], task["app_type"], task["custid"])
+                    cursor.execute(
+                        """
+                        INSERT INTO crawl_metrics (url, fetch_status, speed_ms, size_bytes, time)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (task["url_key"], task["fetch_status"], task["speed_ms"], task["size_bytes"], task["timestamp"]),
+                    )
+                conn.commit()
+                return
+            except Exception as e:
+                if conn:
+                    conn.rollback()
+                attempt += 1
+                if attempt > MAX_RETRIES:
+                    print(f"[DBWriter] Failed to flush batch after {attempt} attempts: {e}")
+                    try:
+                        get_metrics().record_db_batch_failure(str(e), attempt, len(batch))
+                    except Exception:
+                        pass
+                    return
+                backoff = 0.1 * (2 ** (attempt - 1))
+                time.sleep(backoff)
+            finally:
+                if conn:
+                    conn.close()
+
+    def _ensure_site_record(self, cursor, url_key: str, app_type: str, custid: int) -> int:
+        """Insert or update the sites table and return siteid for this URL (deadlock-safe)."""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                cursor.execute(
+                    "SELECT MAX(siteid) FROM sites WHERE custid = %s",
+                    (custid,)
+                )
+                result = cursor.fetchone()
+                max_siteid = result[0] if result and result[0] else custid
+                new_siteid = max_siteid + 1
+
+                cursor.execute(
+                    """
+                    INSERT IGNORE INTO sites (url, app_type, siteid, custid, added_by, time)
+                    VALUES (%s, %s, %s, %s, NULL, NOW())
+                    """,
+                    (url_key, app_type, new_siteid, custid),
+                )
+
+                cursor.execute("SELECT siteid FROM sites WHERE url = %s", (url_key,))
+                row = cursor.fetchone()
+                return row[0] if row else None
+            except Exception as e:
+                if "1213" in str(e) and attempt < max_retries - 1:  # Deadlock error code
+                    wait_time = 0.1 * (2 ** attempt)
+                    time.sleep(wait_time)
+                    continue
+                raise
+
+
+_db_writer = DBWriter()
+_db_writer_started = False
+
+
+def ensure_db_writer_started():
+    global _db_writer_started
+    if not _db_writer_started:
+        _db_writer.start()
+        _db_writer_started = True
+
+
 class Worker(threading.Thread):
     """
     Crawler worker thread: dequeue URL, fetch, parse, enqueue, and mark visited.
     """
 
-    def __init__(self, frontier, name="Worker"):
+    def __init__(self, frontier, name="Worker", is_retry_worker=False):
         super().__init__(name=name)
         self.frontier = frontier
         self.running = True
+        self.is_retry_worker = is_retry_worker
         self.sr_no = 0
         self.crawl_data = []
-        # Per-worker CPU and memory tracking
         self.cpu_percent_samples = []
         self.memory_usage_samples = []
         self.process = psutil.Process(os.getpid())
         tracemalloc.start()
+        ensure_db_writer_started()
 
     def run(self):
         print(f"[WORKER-{self.name}] started")
         while self.running:
             item = self.frontier.dequeue()
             if item is None:
-                # No item currently available; sleep briefly and retry
                 time.sleep(0.1)
                 continue
 
             url, discovered_from, depth = item
 
-            print(f"[WORKER-{self.name}] dequeued:", url)
+            print(f"[WORKER-{self.name}] dequeued: {url}")
 
-            # Capture CPU and memory at start of processing
             cpu_start = self.process.cpu_percent(interval=None)
             mem_start = self.process.memory_info().rss / 1024 / 1024
 
             try:
-                # Fetch with timing
                 fetch_start = time.time()
                 fetch_result = fetch(url, discovered_from, depth)
                 fetch_time = time.time() - fetch_start
                 domain = urlparse(url).netloc
-                timestamp = datetime.now(timezone.utc).isoformat()
-                if fetch_result['success']:
-                    response = fetch_result['response']
-                    # Parse with timing
+                timestamp = datetime.now(ZoneInfo("Asia/Kolkata"))
+                custid = int(os.environ.get("DEFAULT_CUST_ID", 100))
+                app_type = "website"
+                url_key = self._strip_scheme(normalize_url(url))
+                url_key = url_key[:100]  # Cap at 100 chars
+
+                if fetch_result["success"]:
+                    response = fetch_result["response"]
                     parse_start = time.time()
                     html = response.text
                     new_urls, assets = extract_urls(html, url)
                     parse_time = time.time() - parse_start
-                    # Memory measurement after processing
+
                     mem_end = self.process.memory_info().rss / 1024 / 1024
                     memory = mem_end
                     size = len(response.content)
-                    # Calculate crawl_time as total time for fetch + parse + db
                     crawl_time = fetch_time + parse_time
                     self.sr_no += 1
-                    domain = urlparse(url).netloc
-                    
-                    # Record CPU and memory samples
+
                     cpu_end = self.process.cpu_percent(interval=0.1)
                     self.cpu_percent_samples.append(cpu_end)
                     self.memory_usage_samples.append(mem_end - mem_start)
-                    
-                    # Record and print metrics
+
                     metrics = get_metrics()
-                    metrics.record_url(url, domain, "success", size, crawl_time, memory, self.name)
+                    metrics.record_url(url, domain, "success", size, crawl_time, memory, self.name, is_retry=self.is_retry_worker)
                     metrics.print_url_row(url, domain, "success", size, crawl_time, memory, self.name)
 
                     for new_url in new_urls:
                         self.frontier.enqueue(new_url, url, depth + 1)
-                    
-                    # Record assets found on this page (PDFs, images, media in HTML tags)
+
                     if assets:
                         self.frontier.record_assets(url, assets)
 
-                    db_start = time.time()
-                    conn = get_connection(domain)
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (domain, normalize_url(url), discovered_from, json.dumps(new_urls), response.status_code, crawl_time, size, timestamp),
+                    DB_WRITE_QUEUE.put(
+                        {
+                            "url_key": url_key,
+                            "fetch_status": response.status_code,
+                            "speed_ms": crawl_time * 1000.0,
+                            "size_bytes": size,
+                            "timestamp": timestamp,
+                            "app_type": app_type,
+                            "custid": custid,
+                        }
                     )
-                    conn.commit()
-                    conn.close()
-                    db_time = time.time() - db_start
-                    # Add db_time to crawl_time
-                    crawl_time += db_time
                 else:
-                    memory = 0  # or measure
+                    memory = 0
                     size = 0
                     self.sr_no += 1
-                    domain = urlparse(url).netloc
-                    error_reason = fetch_result['error']
-                    fetch_status = fetch_result.get('status', 'failed')  # 'skipped', 'not_found', or 'failed'
-                    
-                    # Record CPU and memory samples for failures too
+                    error_reason = fetch_result["error"]
+                    fetch_status = fetch_result.get("status", "failed")
+
                     cpu_end = self.process.cpu_percent(interval=0.1)
                     mem_end = self.process.memory_info().rss / 1024 / 1024
                     self.cpu_percent_samples.append(cpu_end)
                     self.memory_usage_samples.append(max(0, mem_end - mem_start))
-                    
-                    # Record and print metrics
+
                     metrics = get_metrics()
-                    metrics.record_url(url, domain, fetch_status, size, fetch_time, memory, self.name, error_reason)
+                    metrics.record_url(url, domain, fetch_status, size, fetch_time, memory, self.name, error_reason, is_retry=self.is_retry_worker)
                     metrics.print_url_row(url, domain, fetch_status, size, fetch_time, memory, self.name, error_reason)
-                    
-                    # Record failed fetch
-                    db_start = time.time()
-                    conn = get_connection(domain)
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (domain, normalize_url(url), discovered_from, json.dumps([]), 0, fetch_time, 0, timestamp),
+
+                    DB_WRITE_QUEUE.put(
+                        {
+                            "url_key": url_key,
+                            "fetch_status": 0,
+                            "speed_ms": fetch_time * 1000.0,
+                            "size_bytes": 0,
+                            "timestamp": timestamp,
+                            "app_type": app_type,
+                            "custid": custid,
+                        }
                     )
-                    conn.commit()
-                    conn.close()
-                    db_time = time.time() - db_start
             except Exception as e:
-                # Log the exception to prevent silent failures that cause crawler to hang
                 print(f"[WORKER-{self.name}] Error processing {url}: {e}")
                 import traceback
                 traceback.print_exc()
 
-            # Always mark as visited to prevent hanging, even on error
             try:
                 self.frontier.mark_visited(url)
             except Exception as e:
@@ -161,3 +267,48 @@ class Worker(threading.Thread):
 
     def stop(self):
         self.running = False
+
+    def _strip_scheme(self, url: str) -> str:
+        """Strip scheme and trailing slashes from URL."""
+        if "://" in url:
+            url = url.split("://", 1)[1]
+        # Remove trailing slash except for root (domain only)
+        if url.endswith('/') and '/' in url.split('/', 1)[1:]:  # Has path beyond domain
+            url = url.rstrip('/')
+        return url
+
+    def _ensure_site_record(self, cursor, url_key: str, app_type: str, custid: int) -> int:
+        """Insert or update the sites table and return siteid for this URL.
+        Handles deadlocks by retrying with exponential backoff.
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Get max siteid for this customer
+                cursor.execute(
+                    "SELECT MAX(siteid) FROM sites WHERE custid = %s",
+                    (custid,)
+                )
+                result = cursor.fetchone()
+                max_siteid = result[0] if result and result[0] else custid
+                new_siteid = max_siteid + 1
+                
+                # Insert with calculated siteid; ignore if URL already exists
+                cursor.execute(
+                    """
+                    INSERT IGNORE INTO sites (url, app_type, siteid, custid, added_by, time)
+                    VALUES (%s, %s, %s, %s, NULL, NOW())
+                    """,
+                    (url_key, app_type, new_siteid, custid),
+                )
+                
+                # Get the actual siteid for this URL
+                cursor.execute("SELECT siteid FROM sites WHERE url = %s", (url_key,))
+                row = cursor.fetchone()
+                return row[0] if row else None
+            except Exception as e:
+                if "1213" in str(e) and attempt < max_retries - 1:  # Deadlock error code
+                    wait_time = 0.1 * (2 ** attempt)  # Exponential backoff
+                    time.sleep(wait_time)
+                    continue
+                raise
