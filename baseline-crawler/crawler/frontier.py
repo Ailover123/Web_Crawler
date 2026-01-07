@@ -12,7 +12,6 @@ import logging
 import psutil
 import os
 from crawler.normalizer import normalize_url
-from crawler.parser import classify_url
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +59,16 @@ class Frontier:
 
     def __init__(self):
         self.queue = Queue(maxsize=10_000)  # Thread-safe queue for (url, discovered_from, depth)
-        self.visited = set()  # URLs that have been crawled
-        self.in_progress = set()  # URLs currently being fetched
-        self.discovered = set()  # All URLs discovered
-        self.classifications = {}  # URL classifications
+
+        # Core crawl state (visited / in_progress / discovered) guarded by a single lightweight lock
+        self.state_lock = Lock()
+        self.visited = set()       # URLs that have been crawled
+        self.in_progress = set()   # URLs currently being fetched
+        self.discovered = set()    # All URLs discovered
+
+        # Asset tracking uses its own lock to avoid blocking enqueue/dequeue
+        self.assets_lock = Lock()
         self.assets = {}  # Assets discovered: {source_url: set(unique_asset_urls)} - DEDUPED with set!
-        self.lock = Lock()  # Single lock for atomic operations
 
     def enqueue(self, url, discovered_from=None, depth=0):
         """
@@ -74,37 +77,38 @@ class Frontier:
         Filtering happens here to prevent workers from seeing blocked URLs.
         Returns True if enqueued, False otherwise.
         """
-        with self.lock:
-            if not should_enqueue(url):
-                logger.info(f"enqueue: blocked by policy: {url}")
-                return False  # Block URL based on centralized policy
-            normalized_url = normalize_url(url)
+        # Quick policy check without locks
+        if not should_enqueue(url):
+            logger.info(f"enqueue: blocked by policy: {url}")
+            return False
+
+        normalized_url = normalize_url(url)
+
+        # Reserve slot in in_progress under state lock
+        with self.state_lock:
             if normalized_url in self.visited:
                 logger.info(f"enqueue: skipped (already visited): {normalized_url}")
                 return False
             if normalized_url in self.in_progress:
                 logger.info(f"enqueue: skipped (already in progress): {normalized_url}")
                 return False
-            # reserve immediately
+
+            # Reserve immediately to avoid double work
             self.in_progress.add(normalized_url)
             try:
-                self.queue.put((url, discovered_from, depth))
+                self.queue.put((url, discovered_from, depth), block=False)
             except Exception as e:
                 logger.exception(f"enqueue: queue.put failed for {url}: {e}")
-                # rollback reservation
                 self.in_progress.discard(normalized_url)
                 return False
+
             self.discovered.add(normalized_url)
-            # Store classification
-            try:
-                self.classifications[normalized_url] = classify_url(url)
-            except Exception:
-                logger.debug(f"enqueue: classify_url failed for {url}")
-            # Note: routing_graph removed to reduce memory footprint for smaller crawls
-            # Record assets if any
-            # Note: Assets are not enqueued, just recorded
-            logger.info(f"enqueue: successfully queued {normalized_url} (depth={depth}, discovered_from={discovered_from}) qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
-            return True
+
+        logger.info(
+            f"enqueue: successfully queued {normalized_url} (depth={depth}, discovered_from={discovered_from}) "
+            f"qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}"
+        )
+        return True
 
     def dequeue(self):
         """
@@ -122,21 +126,19 @@ class Frontier:
         Record unique assets found on a page (PDFs, images, docs only).
         Uses set to automatically deduplicate assets across pages.
         """
-        with self.lock:
-            normalized_source = normalize_url(source_url)
-            if asset_urls:
-                # Filter to only: PDFs, images, and documents (skip everything else)
-                ASSET_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp',
-                                   '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'}
-                filtered_assets = [url for url in asset_urls 
-                                  if any(url.lower().endswith(ext) for ext in ASSET_EXTENSIONS)]
-                
-                if filtered_assets:
+        normalized_source = normalize_url(source_url)
+        if asset_urls:
+            ASSET_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp',
+                               '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx'}
+            filtered_assets = [url for url in asset_urls 
+                              if any(url.lower().endswith(ext) for ext in ASSET_EXTENSIONS)]
+
+            if filtered_assets:
+                with self.assets_lock:
                     if normalized_source not in self.assets:
-                        self.assets[normalized_source] = set()  # Use SET for deduplication!
-                    # Add only PDFs, images, docs (duplicates automatically ignored by set)
+                        self.assets[normalized_source] = set()  # Deduplicate automatically
                     self.assets[normalized_source].update(filtered_assets)
-                    logger.info(f"record_assets: stored {len(filtered_assets)} assets from {normalized_source}")
+                logger.info(f"record_assets: stored {len(filtered_assets)} assets from {normalized_source}")
     def mark_visited(self, url):
         """
         Mark a URL as visited and remove from in-progress.
@@ -144,8 +146,7 @@ class Frontier:
         """
         from crawler.normalizer import normalize_url
         normalized = normalize_url(url)
-        with self.lock:
-            # Remove the normalized URL from in_progress and add to visited
+        with self.state_lock:
             if normalized in self.in_progress:
                 self.in_progress.discard(normalized)
             else:
@@ -161,7 +162,9 @@ class Frontier:
         """
         Check if queue is empty and no URLs in progress.
         """
-        empty = self.queue.empty() and len(self.in_progress) == 0
+        with self.state_lock:
+            in_progress_count = len(self.in_progress)
+        empty = self.queue.empty() and in_progress_count == 0
         logger.debug(f"is_empty: queue_empty={self.queue.empty()} in_progress={len(self.in_progress)} -> {empty}")
         return empty
 
@@ -169,10 +172,13 @@ class Frontier:
         """
         Return stats: queue size, visited count, in-progress count.
         """
+        with self.state_lock:
+            visited_count = len(self.visited)
+            in_progress_count = len(self.in_progress)
         return {
             'queue_size': self.queue.qsize(),
-            'visited_count': len(self.visited),
-            'in_progress_count': len(self.in_progress)
+            'visited_count': visited_count,
+            'in_progress_count': in_progress_count
         }
 
     def get_memory_stats(self):
@@ -186,12 +192,11 @@ class Frontier:
         visited_memory = len(self.visited) * 0.05  # ~50 bytes per URL string
         in_progress_memory = len(self.in_progress) * 0.05
         discovered_memory = len(self.discovered) * 0.05
-        classifications_memory = len(self.classifications) * 0.1  # dict with sets (2x because stores set objects)
         # Count unique assets across all pages
         total_unique_assets = len(set().union(*self.assets.values())) if self.assets else 0
         assets_memory = total_unique_assets * 0.05  # ~50 bytes per unique asset URL
         routing_graph_memory = 0  # Removed from memory to save space
-        frontier_memory = queue_memory + visited_memory + in_progress_memory + discovered_memory + classifications_memory + assets_memory
+        frontier_memory = queue_memory + visited_memory + in_progress_memory + discovered_memory + assets_memory
         return {
             'total_process_memory_mb': total_memory,
             'frontier_memory_mb': frontier_memory,
@@ -199,7 +204,6 @@ class Frontier:
             'visited_memory_mb': visited_memory,
             'in_progress_memory_mb': in_progress_memory,
             'discovered_memory_mb': discovered_memory,
-            'classifications_memory_mb': classifications_memory,
             'assets_memory_mb': assets_memory,
             'total_unique_assets': total_unique_assets
         }
