@@ -1,84 +1,134 @@
 """
 Database connection and initialization for the crawler.
-Creates domain-specific databases with the new schema.
+Centralized MySQL database with connection pooling for multi-threaded crawling.
 """
 
-import sqlite3
-from pathlib import Path
-from crawler.config import DATA_DIR
-import os
+import mysql.connector
+from mysql.connector import pooling
+from crawler.config import DB_CONFIG
 
-def get_db_path(domain):
-    """
-    Generate domain-specific database path.
-    """
-    return DATA_DIR / f"data_{domain}.db"
+# Create connection pool at module load time (singleton)
+_db_pool = None
 
-def get_connection(domain):
-    """
-    Create and return a SQLite database connection for a specific domain.
-    """
-    db_path = get_db_path(domain)
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+def _get_pool():
+    """Get or create the connection pool."""
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = pooling.MySQLConnectionPool(
+            pool_name="crawler_pool",
+            pool_size=20,  # Reuse 20 connections
+            pool_reset_session=True,
+            **DB_CONFIG
+        )
+    return _db_pool
 
-def get_failed_db_path(domain):
+def get_connection():
     """
-    Generate domain-specific failed database path.
+    Get a MySQL connection from the pool.
+    Reuses existing connections instead of creating new ones (critical for performance).
     """
-    return DATA_DIR / f"failed_{domain}.db"
+    pool = _get_pool()
+    return pool.get_connection()
 
-def get_failed_connection(domain):
+def initialize_db():
     """
-    Create and return a SQLite database connection for failed crawls of a specific domain.
+    Initialize the centralized MySQL database with required tables.
+    Only keep: sites, crawl_metrics, defacement_sites, defacement_details.
+    This is idempotent - safe to call multiple times.
     """
-    db_path = get_failed_db_path(domain)
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
-
-def initialize_db(domain):
-    """
-    Initialize the database tables for a specific domain.
-    Creates the new schema table for crawl results.
-    """
-    conn = get_connection(domain)
+    conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DROP TABLE IF EXISTS crawl_data;")
-    cursor.execute("""
-    CREATE TABLE crawl_data (
-        domain TEXT,
-        url TEXT PRIMARY KEY,
-        routed_from TEXT,  -- The referrer URL
-        urls_present_on_page TEXT,  -- JSON/Text list of outgoing links
-        fetch_status INTEGER,  -- HTTP status code
-        speed REAL,  -- Fetch duration in ms
-        size INTEGER,  -- Response size in bytes
-        timestamp TEXT  -- Time of crawl (ISO format)
-    );
-    """)
-    conn.commit()
-    conn.close()
 
-def initialize_failed_db(domain):
+    try:
+        # Sites table (centralized)
+        cursor.execute(
+            """
+        CREATE TABLE IF NOT EXISTS sites (
+            siteid INT PRIMARY KEY AUTO_INCREMENT,
+            url VARCHAR(255) UNIQUE NOT NULL,
+            app_type VARCHAR(50),
+            custid INT,
+            added_by VARCHAR(100),
+            time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_custid (custid),
+            INDEX idx_url (url)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+        # Crawl metrics table
+        cursor.execute(
+            """
+        CREATE TABLE IF NOT EXISTS crawl_metrics (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            url VARCHAR(255),
+            fetch_status INT,
+            speed_ms FLOAT,
+            size_bytes INT,
+            time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_url (url),
+            INDEX idx_time (time)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+        # Defacement monitoring sites
+        cursor.execute(
+            """
+        CREATE TABLE IF NOT EXISTS defacement_sites (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            url VARCHAR(255) NOT NULL,
+            group_id INT,
+            email VARCHAR(300),
+            email_cc1 VARCHAR(300),
+            email_cc2 VARCHAR(300),
+            action VARCHAR(20),
+            siteid VARCHAR(100),
+            threshold INT DEFAULT 1,
+            changed_by INT,
+            baseline_time TIMESTAMP NULL,
+            defacement_monitor_status VARCHAR(255),
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_def_sites_url (url(255))
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+        # Defacement detection details
+        cursor.execute(
+            """
+        CREATE TABLE IF NOT EXISTS defacement_details (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            def_id INT,
+            siteid VARCHAR(100),
+            hash VARCHAR(300),
+            baseline_hash VARCHAR(300),
+            status VARCHAR(100),
+            mail_sent VARCHAR(100),
+            defacement VARCHAR(100),
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            flagSetTime VARCHAR(50),
+            KEY idx_defacement_details_siteid (siteid)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+        conn.commit()
+        print("[DB] All tables initialized successfully")
+    except mysql.connector.Error as err:
+        if err.errno == 1050:  # Table already exists
+            print("[DB] Tables already exist (idempotent)")
+        else:
+            print(f"[DB] Error initializing database: {err}")
+            raise
+    finally:
+        cursor.close()
+        conn.close()
+
+def initialize_failed_db():
     """
-    Initialize the database tables for failed crawls of a specific domain.
-    Creates the schema table for failed crawl results.
+    Failed DB is now integrated into centralized MySQL.
+    This function is kept for compatibility but does nothing.
     """
-    conn = get_failed_connection(domain)
-    cursor = conn.cursor()
-    cursor.execute("DROP TABLE IF EXISTS failed_crawl_data;")
-    cursor.execute("""
-    CREATE TABLE failed_crawl_data (
-        domain TEXT,
-        url TEXT PRIMARY KEY,
-        routed_from TEXT,  -- The referrer URL
-        fetch_status INTEGER,  -- HTTP status code
-        error_message TEXT,  -- Error message
-        timestamp TEXT  -- Time of crawl (ISO format)
-    );
-    """)
-    conn.commit()
-    conn.close()
+    pass
  
