@@ -125,10 +125,4 @@ def initialize_db():
         cursor.close()
         conn.close()
 
-def initialize_failed_db():
-    """
-    Failed DB is now integrated into centralized MySQL.
-    This function is kept for compatibility but does nothing.
-    """
-    pass
- 
+
