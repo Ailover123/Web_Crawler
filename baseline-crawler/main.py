@@ -4,11 +4,12 @@ Initializes DB, seeds frontier, starts workers, waits for completion.
 Computes per-domain crawl statistics, prints summaries, and dumps debug JSON.
 """
 
-from crawler.storage.db import initialize_db, get_connection, initialize_failed_db
-from crawler.config import SEED_URLS,MIN_WORKERS,MAX_WORKERS
+from crawler.storage.db import initialize_db, get_connection, fetch_active_sites
+from crawler.config import MIN_WORKERS, MAX_WORKERS
 from crawler.frontier import Frontier
-from crawler.worker import Worker
+from crawler.worker import Worker, finalize_site_outputs
 from crawler.metrics import reset_metrics, get_metrics
+from crawler.policy import URLPolicy
 import time
 import os
 import json
@@ -24,10 +25,11 @@ def get_db_stats():
     cursor.execute("SELECT COUNT(*) FROM sites")
     total_rows = cursor.fetchone()[0]
     
-    # Calculate actual database size from crawl_metrics table
-    cursor.execute("SELECT SUM(size_bytes) FROM crawl_metrics")
-    total_bytes = cursor.fetchone()[0] or 0
-    total_db_size_mb = total_bytes / 1024 / 1024
+    # TEMP DISABLED: crawl_metrics not used for MVP
+    # cursor.execute("SELECT SUM(size_bytes) FROM crawl_metrics")
+    # total_bytes = cursor.fetchone()[0] or 0
+    # total_db_size_mb = total_bytes / 1024 / 1024
+    total_db_size_mb = 0  # In-memory metrics only
     
     conn.close()
     return {
@@ -36,85 +38,100 @@ def get_db_stats():
         'domain_stats': {}
     }
 
+
+def _print_policy_summary(siteid, root_url):
+    stats = URLPolicy.get_stats()
+    print(f"=== POLICY SUMMARY FOR siteid={siteid} ({root_url}) ===")
+    for key in sorted(stats.keys()):
+        print(f"{key}: {stats[key]}")
+    print("")
+
 def main():
     # Initialize metrics system
     metrics = reset_metrics()
 
-    # Extract unique domains from seed URLs
-    domains = set()
-    for seed_url in SEED_URLS:
-        domain = urlparse(seed_url).netloc
-        domains.add(domain)
-
     # Initialize centralized MySQL schema (idempotent)
     initialize_db()
 
-    # Create frontier
-    frontier = Frontier()
+    # Fetch active sites from database
+    active_sites = fetch_active_sites()
+    if not active_sites:
+        print("[CRAWL] No active sites found in database. Skipping crawl.")
+        return
 
-    # Seed frontier
-    for seed_url in SEED_URLS:
-        frontier.enqueue(seed_url, None, 0)  # discovered_from=None, depth=0 for seeds
+    print(f"[CRAWL] Found {len(active_sites)} active site(s) to crawl")
 
-    # Record crawl start time
-    start_time = time.time()
+    # Crawl each site separately with its own frontier
+    for siteid, root_url, custid, app_type in active_sites:
+        print(f"\n[CRAWL] ===== Starting crawl for siteid={siteid}: {root_url} =====\n")
+        URLPolicy.reset_stats()
 
-    # Start workers
-    workers = []
-    num_workers = MIN_WORKERS
-    for i in range(num_workers):
-        worker = Worker(frontier, name=f"Worker-{i}")
-        worker.start()
-        workers.append(worker)
+        # Create fresh frontier for this site
+        frontier = Frontier()
 
-    # Wait for completion with dynamic scaling (max 5 minutes timeout)
-    last_log_time = time.time()
-    idle_counter = 0
-    max_timeout = 300  # 5 minutes
-    start_wait = time.time()
-    
-    while not frontier.is_empty():
-        time.sleep(1)
-        current_time = time.time()
-        elapsed_wait = current_time - start_wait
+        # Register site scope for this siteid (used for scope validation during crawl)
+        frontier.set_site_scope(siteid, root_url)
+
+        # Seed frontier with the root URL for this site
+        frontier.enqueue(root_url, discovered_from=None, depth=0, siteid=siteid)
+
+        # Record crawl start time
+        start_time = time.time()
+
+        # Start workers
+        workers = []
+        num_workers = MIN_WORKERS
+        for i in range(num_workers):
+            worker = Worker(frontier, name=f"Worker-{i}")
+            worker.start()
+            workers.append(worker)
+
+        # Wait for completion with dynamic scaling (max 5 minutes timeout)
+        last_log_time = time.time()
+        idle_counter = 0
+        max_timeout = 300  # 5 minutes
+        start_wait = time.time()
         
-        # Check if timeout exceeded
-        if elapsed_wait > max_timeout:
-            print(f"\n[TIMEOUT] Crawl exceeded {max_timeout}s. Forcing shutdown...\n")
-            break
-        
-        # Print progress summary every 30 seconds
-        if current_time - last_log_time > 30:
-            frontier_stats = frontier.get_stats()
-            db_stats = get_db_stats()
-            metrics.print_progress_summary(frontier_stats, db_stats)
-            print(f"[Elapsed: {int(elapsed_wait)}s/{max_timeout}s]")
-            last_log_time = current_time
+        while not frontier.is_empty():
+            time.sleep(1)
+            current_time = time.time()
+            elapsed_wait = current_time - start_wait
             
-            # Track idle state (no queue movement)
-            if frontier_stats['queue_size'] == 0 and frontier_stats['in_progress_count'] > 0:
-                idle_counter += 1
-                if idle_counter > 3:  # 3 cycles (90 seconds) with no progress
-                    print(f"\n[STALLED] {frontier_stats['in_progress_count']} URLs stuck in progress. Force shutting down...\n")
-                    break
-            else:
-                idle_counter = 0
+            # Check if timeout exceeded
+            if elapsed_wait > max_timeout:
+                print(f"\n[TIMEOUT] Crawl for siteid={siteid} exceeded {max_timeout}s. Forcing shutdown...\n")
+                break
+            
+            # Print progress summary every 30 seconds
+            if current_time - last_log_time > 30:
+                frontier_stats = frontier.get_stats()
+                db_stats = get_db_stats()
+                metrics.print_progress_summary(frontier_stats, db_stats)
+                print(f"[Elapsed: {int(elapsed_wait)}s/{max_timeout}s]")
+                last_log_time = current_time
+                
+                # Track idle state (no queue movement)
+                if frontier_stats['queue_size'] == 0 and frontier_stats['in_progress_count'] > 0:
+                    idle_counter += 1
+                    if idle_counter > 3:  # 3 cycles (90 seconds) with no progress
+                        print(f"\n[STALLED] {frontier_stats['in_progress_count']} URLs stuck in progress. Force shutting down...\n")
+                        break
+
+        # Stop workers for this site
+        print(f"[CRAWL] Stopping workers for siteid={siteid}...")
+        for worker in workers:
+            worker.stop()
+            worker.join()
+
+        finalize_site_outputs(siteid)
+        print(f"[CRAWL] ===== Completed crawl for siteid={siteid}: {root_url} =====\n")
         
-        # Dynamic worker scaling: scale up based on queue size, max 20 workers
-        current_queue_size = frontier.get_stats()['queue_size']
-        if current_queue_size > 100 and len(workers) < MAX_WORKERS:
-            new_worker = Worker(frontier, name=f"Worker-{len(workers)}")
-            new_worker.start()
-            workers.append(new_worker)
-            print(f"\n Scaled up to {len(workers)} workers due to queue size {current_queue_size}\n")
+        # Capture and store policy stats for this domain
+        policy_stats = URLPolicy.get_stats()
+        metrics.record_policy_stats_for_domain(root_url, policy_stats)
+        _print_policy_summary(siteid, root_url)
 
-    # Record crawl end time
-    end_time = time.time()
-
-    # Stop workers
-    for worker in workers:
-        worker.stop()
-        worker.join()
+    print("\n[CRAWL] ===== ALL SITES CRAWLED =====\n")
 
     # Flush DB writer queue before summary
     try:
@@ -127,49 +144,16 @@ def main():
     except Exception as e:
         print(f"[Main] Warning: Could not flush DB writer: {e}")
 
-    # Collect CPU and memory stats from workers before doing anything else
-    metrics.collect_worker_stats(workers)
-
-    # RETRY MECHANISM: Retry timeout failures
-    print("\n" + "="*100)
-    print("CHECKING FOR TIMEOUT FAILURES TO RETRY")
-    print("="*100)
-
-    # Collect timeout failures from metrics
-    timeout_urls = [record for record in metrics.url_records
-                    if record['status'] == 'failed' and 'timeout' in record.get('error_reason', '').lower()]
-
-    if timeout_urls:
-        print(f"\n Found {len(timeout_urls)} timeout failures. Retrying with 2 workers...\n")
-
-        # Re-enqueue timeout URLs
-        for record in timeout_urls:
-            frontier.enqueue(record['url'], record.get('discovered_from'), 0)
-
-        # Start 2 retry workers with is_retry_worker=True flag
-        retry_workers = []
-        for i in range(2):
-            worker = Worker(frontier, name=f"Retry-{i}", is_retry_worker=True)
-            worker.start()
-            retry_workers.append(worker)
-
-        # Wait for retry completion
-        while not frontier.is_empty():
-            time.sleep(1)
-
-        # Stop retry workers
-        for worker in retry_workers:
-            worker.stop()
-            worker.join()
-
-        print(f"\n Retry phase completed\n")
-    else:
-        print(f"\n No timeout failures found. Skipping retry phase.\n")
-
     # Print comprehensive final summary
     db_stats = get_db_stats()
-    mem_stats = frontier.get_memory_stats()
-    metrics.print_final_summary(db_stats, mem_stats)
+    print("\n[Main] Crawl completed. Summary:")
+    print(f"  Total rows in sites table: {db_stats['total_rows']}")
+    print(f"  Total DB size: {db_stats['total_db_size_mb']:.2f} MB")
+
+    # Write per-domain stats to JSON file
+    stats_file = metrics.write_domain_stats_to_json()
+    if stats_file:
+        print(f"[Main] Per-domain statistics saved to: {stats_file}")
 
 
 if __name__ == "__main__":
