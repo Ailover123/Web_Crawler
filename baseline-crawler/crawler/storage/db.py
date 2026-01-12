@@ -1,48 +1,41 @@
 """
-Database connection and initialization for the crawler.
-Creates domain-specific databases with the new schema.
+DB access layer
+All DB access is routed through MySQL only
 """
 
-import sqlite3
-from pathlib import Path
-from crawler.config import DATA_DIR
-import os
+from .mysql import (
+    # existing writes
+    insert_crawl_page,
+    insert_baseline,
+    insert_diff,
 
-def get_db_path(domain):
-    """
-    Generate domain-specific database path.
-    """
-    return DATA_DIR / f"data_{domain}.db"
+    # health + infra
+    check_db_health,
+    fetch_enabled_sites,
 
-def get_connection(domain):
-    """
-    Create and return a SQLite database connection for a specific domain.
-    """
-    db_path = get_db_path(domain)
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    return conn
+    # crawl job lifecycle
+    insert_crawl_job,
+    complete_crawl_job,
+    fail_crawl_job,
+)
 
-def initialize_db(domain):
-    """
-    Initialize the database tables for a specific domain.
-    Creates the new schema table for crawl results.
-    """
-    conn = get_connection(domain)
-    cursor = conn.cursor()
-    cursor.execute("DROP TABLE IF EXISTS crawl_data;")
-    cursor.execute("""
-    CREATE TABLE crawl_data (
-        domain TEXT,
-        url TEXT PRIMARY KEY,
-        routed_from TEXT,  -- The referrer URL
-        urls_present_on_page TEXT,  -- JSON/Text list of outgoing links
-        fetch_status INTEGER,  -- HTTP status code
-        speed REAL,  -- Fetch duration in ms
-        size INTEGER,  -- Response size in bytes
-        timestamp TEXT  -- Time of crawl (ISO format)
-    );
-    """)
-    conn.commit()
-    conn.close()
- 
+# -------------------------------------------------
+# Explicit exports
+# -------------------------------------------------
+__all__ = [
+    # crawl data
+    "insert_crawl_page",
+    "insert_baseline",
+    "insert_diff",
+
+    # site discovery
+    "fetch_enabled_sites",
+
+    # crawl job lifecycle
+    "insert_crawl_job",
+    "complete_crawl_job",
+    "fail_crawl_job",
+
+    # infra
+    "check_db_health",
+]

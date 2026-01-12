@@ -1,81 +1,108 @@
-# #Baseline Storage
-# Responsibilities:
-# - persist trusted baseline fingerprints per URL
-# - retrieve baseline data for comparison
-# - update baselines only during baseline creation phase
-
+from pathlib import Path
+from urllib.parse import urlparse
 import json
-from datetime import datetime, timezone
-from crawler.storage.db import get_connection
-from crawler.normalizer import normalize_url
+import threading
 
-def now():
-  return datetime.now(timezone.utc).isoformat()
+BASELINE_ROOT = Path("baselines")
+OBSERVED_ROOT = Path("observed")
 
-def store_baseline(url, html_hash, script_sources, script_count=None):
-  #Insert or update baseline for a URL.
-  # Normalize URL key so lookups are consistent
-  nurl = normalize_url(url)
-  # Persist script_sources and script_count together so callers can pass script_count
-  payload = {
-    'sources': script_sources or [],
-    'count': script_count or (len(script_sources) if script_sources else 0)
-  }
-  scripts_json = json.dumps(payload)
-  conn = get_connection()
-  cursor = conn.cursor()
-  cursor.execute("""
-  INSERT INTO baseline 
-  (url, html_hash, script_sources, baseline_created_at, baseline_updated_at)
-  VALUES (?, ?, ?, ?, ?)
-  ON CONFLICT(url) DO UPDATE SET
-  html_hash=excluded.html_hash,
-  script_sources=excluded.script_sources,
-  baseline_updated_at=excluded.baseline_updated_at;
-  """,
-  (nurl, html_hash, scripts_json, now(), now())
-  )
-  conn.commit()
-  cursor.close()
-  conn.close()
+_lock = threading.Lock()
 
 
-def get_baseline(url):
-  #Retrieve baseline data for a URL.
-  conn = get_connection()
-  cursor = conn.cursor()
-  nurl = normalize_url(url)
-  cursor.execute("""
-  SELECT html_hash, script_sources FROM baseline WHERE url = ?""",
-  (nurl,)
-  )
+def _get_root_domain(url: str) -> str:
+    return urlparse(url).netloc.lower()
 
-  row = cursor.fetchone()
-  if row is None:
-    cursor.close()
-    conn.close()
-    return None
-  
-  else:
-    html_hash, scripts_json = row
-    parsed = json.loads(scripts_json) if scripts_json else {'sources': [], 'count': 0}
-    script_sources = parsed.get('sources', [])
-    script_count = parsed.get('count', 0)
-    cursor.close()
-    conn.close()
-    return {
-        "html_hash": html_hash,
-        "script_sources": script_sources,
-        "script_count": script_count
-    }
 
-def baseline_exists(url):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT 1 FROM baseline WHERE url = ? LIMIT 1",
-        (normalize_url(url),)
+def _get_or_create_site_folder(root: Path, custid: int, url: str) -> str:
+    cust_dir = root / str(custid)
+    cust_dir.mkdir(parents=True, exist_ok=True)
+
+    index_file = cust_dir / "index.json"
+    root_domain = _get_root_domain(url)
+
+    with _lock:
+        data = json.loads(index_file.read_text()) if index_file.exists() else {}
+
+        if root_domain in data:
+            return data[root_domain]
+
+        site_number = len(data) + 1
+        site_folder_id = f"{custid}{site_number:02d}"
+        data[root_domain] = site_folder_id
+
+        index_file.write_text(
+            json.dumps(data, indent=2),
+            encoding="utf-8"
+        )
+
+    return site_folder_id
+
+
+def _get_next_page_filename(site_dir: Path, site_folder_id: str) -> str:
+    index_file = site_dir / "index.json"
+
+    counter = (
+        json.loads(index_file.read_text()).get("counter", -1) + 1
+        if index_file.exists()
+        else 0
     )
-    exists = cur.fetchone() is not None
-    conn.close()
-    return exists
+
+    index_file.write_text(
+        json.dumps({"counter": counter}, indent=2),
+        encoding="utf-8"
+    )
+
+    return (
+        f"{site_folder_id}.html"
+        if counter == 0
+        else f"{site_folder_id}-{counter}.html"
+    )
+
+
+def _canonicalize_for_storage(html: str) -> str:
+    # Convert escaped newlines (defensive)
+    if "\\n" in html:
+        html = html.replace("\\n", "\n")
+
+    return html.strip()
+
+
+def store_snapshot_file(*, custid: int, url: str, html: str, crawl_mode: str):
+    crawl_mode = crawl_mode.upper()
+    root = BASELINE_ROOT if crawl_mode == "BASELINE" else OBSERVED_ROOT
+
+    site_folder_id = _get_or_create_site_folder(root, custid, url)
+    site_dir = root / str(custid) / site_folder_id
+    site_dir.mkdir(parents=True, exist_ok=True)
+
+    page_name = _get_next_page_filename(site_dir, site_folder_id)
+    path = site_dir / page_name
+
+    html = _canonicalize_for_storage(html)
+
+    # ✅ WRITE RAW HTML (THIS IS THE FIX)
+    path.write_text(
+        html,
+        encoding="utf-8",
+        newline="\n"
+    )
+
+    return site_folder_id, page_name, str(path)
+
+
+def load_all_baseline_pages(custid: int, site_folder_id: str) -> list[str]:
+    """
+    Returns raw HTML strings.
+    """
+    site_dir = BASELINE_ROOT / str(custid) / site_folder_id
+    if not site_dir.exists():
+        return []
+
+    pages = []
+    for f in site_dir.glob("*.html"):
+        try:
+            pages.append(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+    return pages
