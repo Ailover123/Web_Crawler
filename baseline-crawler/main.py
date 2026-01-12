@@ -1,115 +1,233 @@
+#!/usr/bin/env python3
 """
-Entry point for the web crawler.
-Initializes DB, seeds frontier, starts workers, waits for completion.
-Computes per-domain crawl statistics, prints summaries, and dumps debug JSON.
+Entry point for the web crawler (MySQL version).
+- Validates MySQL connectivity
+- Fetches crawl targets from DB (sites table)
+- Creates a crawl job per site
+- Seeds the frontier
+- Runs workers with adaptive scaling
+- Tracks crawl_jobs lifecycle
+- Prints crawl summary per site
 """
 
-from crawler.storage.db import initialize_db, get_db_path, get_connection
-from crawler.config import SEED_URLS
+from dotenv import load_dotenv
+load_dotenv()
+
+import time
+import uuid
 from crawler.frontier import Frontier
 from crawler.worker import Worker
-from combined_domain_analysis import generate_combined_domain_analysis
-import time
+from crawler.normalizer import normalize_url
+from crawler.storage.db import (
+    check_db_health,
+    fetch_enabled_sites,
+    insert_crawl_job,
+    complete_crawl_job,
+    fail_crawl_job,
+)
 import os
-import json
-import datetime
-from urllib.parse import urlparse
-from threading import Lock
+CRAWL_MODE = os.getenv("CRAWL_MODE", "CRAWL").upper()
+
+assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE"), (
+    f"Invalid CRAWL_MODE={CRAWL_MODE}. "
+    "Must be BASELINE, CRAWL, or COMPARE."
+)
+
+
+from crawler.worker import BLOCK_REPORT
+
+
+# --- CONFIG ---
+INITIAL_WORKERS = 5
+MAX_WORKERS = 20
+SCALE_THRESHOLD = 100  # queue size
+
+
 def main():
-    # Extract unique domains from seed URLs
-    domains = set()
-    for seed_url in SEED_URLS:
-        domain = urlparse(seed_url).netloc
-        domains.add(domain)
+    # -------------------------------------------------
+    # 1. Hard DB safety check (fail fast)
+    # -------------------------------------------------
+    try:
+        if not check_db_health():
+            print("ERROR: MySQL health check failed. Exiting.")
+            return
+    except Exception as e:
+        print(f"ERROR: MySQL unavailable: {e}")
+        return
 
-    # Initialize domain-specific databases
-    old_runs_dir = os.path.join(os.path.dirname(get_db_path("dummy")), "old_runs")
-    os.makedirs(old_runs_dir, exist_ok=True)
-    for domain in domains:
-        db_path = get_db_path(domain)
-        if os.path.exists(db_path):
-            # Move old DB to old_runs with timestamp
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            old_db_name = f"data_{domain}_{timestamp}.db"
-            old_db_path = os.path.join(old_runs_dir, old_db_name)
-            os.rename(db_path, old_db_path)
-            print(f"Moved old DB for {domain} to {old_db_path}")
-        initialize_db(domain)
+    print("MySQL health check passed.")
 
-    # Create frontier
-    frontier = Frontier()
+    # -------------------------------------------------
+    # 2. Fetch crawl targets from DB
+    # -------------------------------------------------
+    sites = fetch_enabled_sites()
+    if not sites:
+        print("No enabled sites found in DB. Exiting.")
+        return
 
-    # Seed frontier
-    for seed_url in SEED_URLS:
-        frontier.enqueue(seed_url, None, 0)  # discovered_from=None, depth=0 for seeds
+    print(f"Found {len(sites)} enabled site(s) to crawl.")
 
-    # Record crawl start time
-    start_time = time.time()
+    # -------------------------------------------------
+    # 3. Crawl each site independently
+    # -------------------------------------------------
+    for site in sites:
+        # Defensive: ensure dictionary keys match exactly
+        assert "siteid" in site, "Key 'siteid' missing from site dict. Check fetch_enabled_sites() output."
+        siteid = site["siteid"]
+        custid = site["custid"]
 
-    # Start workers
-    workers = []
-    num_workers = 5  # Start with 5 workers for concurrency
-    for i in range(num_workers):
-        worker = Worker(frontier, name=f"Worker-{i}")
-        worker.start()
-        workers.append(worker)
+        # Raw URL from DB may contain stray whitespace or missing scheme.
+        raw_url = site["url"]
+        start_url = normalize_url(raw_url.strip() if isinstance(raw_url, str) else raw_url)
 
-    # Wait for completion with dynamic scaling
-    while not frontier.is_empty():
-        time.sleep(1)
-        # Dynamic worker scaling: scale up based on queue size, max 20 workers
-        current_queue_size = frontier.get_stats()['queue_size']
-        if current_queue_size > 100 and len(workers) < 20:
-            new_worker = Worker(frontier, name=f"Worker-{len(workers)}")
-            new_worker.start()
-            workers.append(new_worker)
-            print(f"Scaled up to {len(workers)} workers due to queue size {current_queue_size}")
+        # Defensive: ensure siteid is not None
+        assert siteid is not None, "siteid is None — check sites table data"
 
-    # Record crawl end time
-    end_time = time.time()
+        job_id = str(uuid.uuid4())
 
-    # Stop workers
-    for worker in workers:
-        worker.stop()
-        worker.join()
+        print("\n" + "=" * 60)
+        print(f"Starting crawl job {job_id}")
+        print(f"Customer ID : {custid}")
+        print(f"Site ID     : {siteid}")
+        print(f"Seed URL    : {start_url}")
+        print("=" * 60)
 
-    # Calculate and display crawl statistics
-    crawl_duration = end_time - start_time
-    stats = frontier.get_stats()
+        try:
+            # -------------------------------------------------
+            # 4. Register crawl job (lifecycle START)
+            # -------------------------------------------------
+            insert_crawl_job(
+                job_id=job_id,
+                custid=custid,
+                siteid=siteid,
+                start_url=start_url,
+            )
 
-    print("\n" + "="*60)
-    print("CRAWL COMPLETED")
-    print("="*60)
-    print(f"Total crawl time: {crawl_duration:.2f} seconds")
-    print(f"URLs visited: {stats['visited_count']}")
-    print(f"URLs in progress: {stats['in_progress_count']}")
-    print(f"URLs remaining in queue: {stats['queue_size']}")
-    print(f"Total workers used: {len(workers)}")
-    print(f"Routing graph size: {len(frontier.routing_graph)} nodes")
+            # -------------------------------------------------
+            # 5. Initialize frontier
+            # -------------------------------------------------
+            frontier = Frontier()
+            frontier.enqueue(
+                start_url,
+                discovered_from=None,
+                depth=0,
+            )
 
-    # Per-domain statistics
-    print("\nPer-Domain Statistics:")
-    for domain in domains:
-        conn = get_connection(domain)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM crawl_data")
-        url_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM crawl_data WHERE fetch_status = 200")
-        success_count = cursor.fetchone()[0]
-        conn.close()
-        print(f"  {domain}: {url_count} URLs crawled, {success_count} successful")
+            # -------------------------------------------------
+            # 6. Start workers
+            # -------------------------------------------------
+            workers = []
+            start_time = time.time()
 
-    print("="*60)
+            # Worker expects a map → keep interface intact
+            siteid_map = {siteid: siteid}
 
-    # Generate combined domain analysis JSON
-    combined_analysis = generate_combined_domain_analysis(frontier)
-    with open('combined_domain_analysis.json', 'w') as f:
-        json.dump(combined_analysis, f, indent=4)
+            for i in range(INITIAL_WORKERS):
+                w = Worker(
+                    frontier=frontier,
+                    name=f"Worker-{i}",
+                    custid=custid,
+                    siteid_map=siteid_map,
+                    job_id=job_id,
+                    crawl_mode=CRAWL_MODE,
+                )
+                w.start()
+                workers.append(w)
 
-    # Output routing graph JSON
-    with open('routing_graph.json', 'w') as f:
-        json.dump(frontier.routing_graph, f, indent=4)
+            print(f"Started {len(workers)} workers.")
 
-    
+            # -------------------------------------------------
+            # 7. Crawl loop with adaptive scaling
+            # -------------------------------------------------
+            while not frontier.is_empty():
+                time.sleep(1)
+
+                stats = frontier.get_stats()
+                qsize = stats["queue_size"]
+
+                if qsize > SCALE_THRESHOLD and len(workers) < MAX_WORKERS:
+                    w = Worker(
+                        frontier=frontier,
+                        name=f"Worker-{len(workers)}",
+                        custid=custid,
+                        siteid_map=siteid_map,
+                        job_id=job_id,
+                        crawl_mode=CRAWL_MODE,
+                    )
+                    w.start()
+                    workers.append(w)
+                    print(f"Scaled up → {len(workers)} workers (queue={qsize})")
+
+            # -------------------------------------------------
+            # 8. Shutdown workers cleanly
+            # -------------------------------------------------
+            for w in workers:
+                w.stop()
+
+            for w in workers:
+                w.join()
+
+            end_time = time.time()
+
+            # -------------------------------------------------
+            # 9. Mark crawl job as COMPLETED
+            # -------------------------------------------------
+            pages_crawled = frontier.get_stats()["visited_count"]
+
+            complete_crawl_job(
+                job_id=job_id,
+                pages_crawled=pages_crawled,
+            )
+
+            # -------------------------------------------------
+            # 10. Print crawl summary
+            # -------------------------------------------------
+            duration = end_time - start_time
+            stats = frontier.get_stats()
+
+            print("\n" + "-" * 60)
+            print("CRAWL COMPLETED")
+            print("-" * 60)
+            print(f"Job ID            : {job_id}")
+            print(f"Customer ID       : {custid}")
+            print(f"Site ID           : {siteid}")
+            print(f"Seed URL          : {start_url}")
+            print(f"Total URLs visited: {stats['visited_count']}")
+            print(f"Crawl duration    : {duration:.2f} seconds")
+            print(f"Workers used      : {len(workers)}")
+            print(f"Routing graph     : {len(frontier.routing_graph)} nodes")
+            print("-" * 60)
+
+        except Exception as e:
+            # -------------------------------------------------
+            # 11. Mark crawl job as FAILED
+            # -------------------------------------------------
+            fail_crawl_job(job_id, str(e))
+            print(f"ERROR: Crawl job {job_id} failed: {e}")
+            raise
+
+    print("\nAll site crawls completed successfully.")
+
+
 if __name__ == "__main__":
+    # Run the crawler and then, if any URLs were blocked by the worker-level
+    # rules, print a concise report so we can see if over-aggressive blocking
+    # is the reason no URLs are being crawled.
     main()
+
+    if BLOCK_REPORT:
+        print("\n" + "=" * 60)
+        print("BLOCKED URL REPORT")
+        print("=" * 60)
+
+        total = 0
+        for block_type, urls in BLOCK_REPORT.items():
+            print(f"\n[{block_type}]  {len(urls)} URLs blocked")
+            for u in urls[:20]:
+                print(f"  - {u}")
+            if len(urls) > 20:
+                print(f"  ... ({len(urls) - 20} more)")
+            total += len(urls)
+
+        print("\nTotal blocked URLs:", total)
+        print("=" * 60)
