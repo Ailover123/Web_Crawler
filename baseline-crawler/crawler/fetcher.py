@@ -9,7 +9,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import time
 from urllib.parse import urlparse
-from crawler.config import USER_AGENT, REQUEST_TIMEOUT
+from crawler.config import USER_AGENT, REQUEST_TIMEOUT, VERIFY_SSL_CERTIFICATE
+
+# Suppress SSL certificate warnings when VERIFY_SSL_CERTIFICATE is False
+if not VERIFY_SSL_CERTIFICATE:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Shared session with retry/backoff to smooth over transient slowdowns without growing memory usage.
 _session = requests.Session()
@@ -38,7 +43,7 @@ def fetch(url, discovered_from=None, depth=0):
             url,
             timeout=(5, REQUEST_TIMEOUT),  # (connect_timeout, read_timeout)
             headers={"User-Agent": USER_AGENT},
-            verify=True,
+            verify=VERIFY_SSL_CERTIFICATE,  # SSL certificate verification (False = allow invalid certs)
             allow_redirects=True,
         )
         fetch_time_ms = int((time.time() - start_time) * 1000)
@@ -68,6 +73,17 @@ def fetch(url, discovered_from=None, depth=0):
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "timeout", discovered_from, depth)
         print(f"[fetch] timeout after {fetch_time_ms}ms: {url}")
         return {'success': False, 'error': 'timeout', 'status': 'failed'}
+    except requests.exceptions.SSLError as e:
+        fetch_time_ms = int((time.time() - start_time) * 1000)
+        # SSL certificate errors (self-signed, expired, hostname mismatch, etc.)
+        error_msg = str(e)
+        if 'CERTIFICATE_VERIFY_FAILED' in error_msg:
+            print(f"[fetch] SSL certificate verification failed after {fetch_time_ms}ms: {url}")
+            print(f"[fetch]   └─ Reason: Invalid/self-signed SSL certificate")
+            return {'success': False, 'error': 'ssl_cert_invalid', 'status': 'failed'}
+        else:
+            print(f"[fetch] SSL error after {fetch_time_ms}ms: {url} -> {e}")
+            return {'success': False, 'error': 'ssl_error', 'status': 'failed'}
     except requests.exceptions.ConnectionError:
         fetch_time_ms = int((time.time() - start_time) * 1000)
         # _record_to_db(url, domain, "fetch_failed", None, None, 0, fetch_time_ms, "connection_error", discovered_from, depth)
