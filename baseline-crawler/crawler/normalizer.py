@@ -21,21 +21,48 @@ def normalize_html(soup):
 
 
 def normalize_url(url):
-    """
-    Normalize URLs by removing trailing slash from path, except for root.
-    Do NOT normalize query params, fragments, or CMS paths.
-    """
-    from urllib.parse import urlparse, urlunparse
-    try:
-        p = urlparse(url)
-        # Only modify path: remove trailing / if not root
-        path = p.path
-        if path.endswith('/') and path != '/':
-            path = path.rstrip('/')
-        normalized = urlunparse((p.scheme, p.netloc, path, p.params, p.query, p.fragment))
-        return normalized
-    except Exception:
-        return url
+  """
+  Normalize URLs while preserving scheme/host/query but collapsing duplicate
+  representations of the root. All roots canonicalize to "/" so
+  https://site.com and https://site.com/ map to the same key.
+  """
+  from urllib.parse import urlparse, urlunparse
+  try:
+    p = urlparse(url)
+    # Root canonicalization: empty path becomes "/"
+    path = p.path or '/'
+    if path != '/' and path.endswith('/'):
+      path = path.rstrip('/')
+      if not path:
+        path = '/'
+    normalized = urlunparse((p.scheme, p.netloc, path, p.params, p.query, p.fragment))
+    return normalized
+  except Exception:
+    return url
+
+
+def extract_relative_path(url):
+  """Return the relative path (path + query + fragment) capped at 255 chars.
+  Preserves the trailing slash after parent URL so child URLs don't start with /.
+  Removes leading slash for non-root paths so child URLs store as 'about' not '/about'."""
+  from urllib.parse import urlparse
+  try:
+    parsed = urlparse(url)
+    path = parsed.path or '/'
+    if not path.startswith('/'):
+      path = '/' + path
+    # Keep trailing slash to separate parent from child (don't strip trailing slash)
+    # Remove leading slash for non-root paths (so /about becomes about)
+    if path != '/':
+      path = path.lstrip('/')
+    rel = path
+    if parsed.query:
+      rel = f"{rel}?{parsed.query}"
+    if parsed.fragment:
+      rel = f"{rel}#{parsed.fragment}"
+    return rel[:255]
+  except Exception:
+    return '/'
 
 
 def strip_trivial_comments(html_text):
