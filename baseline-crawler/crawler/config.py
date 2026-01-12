@@ -45,3 +45,15 @@ DB_CONFIG = {
     'raise_on_warnings': False,
     'connection_timeout': 10
 }
+
+# Centralized policy configuration
+# - allow_taxonomy_paths: when True, blog/tag/category/author/date archive URLs are allowed
+#   (feeds/search/wp-admin/wp-json/amp/print remain blocked)
+POLICY = {
+    'allow_taxonomy_paths': True,
+}
+
+# SSL Certificate Verification
+# Set to False to allow crawling sites with invalid/self-signed SSL certificates
+VERIFY_SSL_CERTIFICATE = False
+
