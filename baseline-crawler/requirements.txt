@@ -6,3 +6,4 @@ pandas
 psutil
 tabulate
 mysql-connector-python
+tldextract
