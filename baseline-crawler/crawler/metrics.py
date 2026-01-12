@@ -48,7 +48,8 @@ class CrawlerMetrics:
             'total_size_bytes': 0,
             'total_fetch_time': 0.0,
             'max_memory_mb': 0.0,
-            'urls': []
+            'urls': [],
+            'policy_stats': {}  # URL policy evaluation stats for this domain
         })
         
         # Overall metrics
@@ -282,6 +283,19 @@ class CrawlerMetrics:
             if hasattr(worker, 'cpu_percent_samples') and hasattr(worker, 'memory_usage_samples'):
                 self.worker_stats[worker.name]['cpu_samples'] = worker.cpu_percent_samples
                 self.worker_stats[worker.name]['memory_samples'] = worker.memory_usage_samples
+    
+    def record_policy_stats_for_domain(self, domain, policy_stats):
+        """
+        Store URL policy evaluation stats for a specific domain.
+        Called after each site crawl completes.
+        
+        Args:
+            domain: Domain name
+            policy_stats: Dict of policy stats from URLPolicy.get_stats()
+        """
+        with self.lock:
+            if domain in self.domain_stats:
+                self.domain_stats[domain]['policy_stats'] = policy_stats.copy()
     
     def print_progress_summary(self, frontier_stats, db_stats):
         """
@@ -570,6 +584,100 @@ class CrawlerMetrics:
         print("\n" + "="*100)
         import sys
         sys.stdout.flush()
+
+    def write_domain_stats_to_json(self, output_file=None):
+        """
+        Write per-domain statistics to a JSON file in the data folder.
+        """
+        import json
+        from pathlib import Path
+        
+        if output_file is None:
+            # Default to data folder with timestamp
+            data_dir = Path(__file__).resolve().parents[2] / 'data'
+            data_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_file = data_dir / f"domain_stats_{timestamp}.json"
+        else:
+            output_file = Path(output_file)
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Compile domain stats
+        domain_data = {}
+        total_domains = 0
+        totals_accumulator = {
+            'total_urls': 0,
+            'success_count': 0,
+            'skipped_count': 0,
+            'not_found_count': 0,
+            'failed_count': 0,
+            'total_size_bytes': 0,
+            'total_crawl_time_seconds': 0.0,
+        }
+        with self.lock:
+            for domain in sorted(self.domain_stats.keys()):
+                stats = self.domain_stats[domain]
+                total_urls = stats['total_urls']
+                total_crawl_time = stats['total_fetch_time']
+                domain_entry = {
+                    'total_urls': total_urls,
+                    'success_count': stats['success_count'],
+                    'skipped_count': stats['skipped_count'],
+                    'not_found_count': stats['not_found_count'],
+                    'failed_count': stats['failed_count'],
+                    'total_size_bytes': stats['total_size_bytes'],
+                    'total_size_mb': stats['total_size_bytes'] / 1024 / 1024,
+                    'total_size_gb': stats['total_size_bytes'] / 1_000_000_000,
+                    'total_crawl_time_seconds': total_crawl_time,
+                    'total_crawl_time_minutes': total_crawl_time / 60.0,
+                    'avg_crawl_time_seconds': total_crawl_time / max(1, total_urls),
+                    'avg_crawl_time_minutes': (total_crawl_time / max(1, total_urls)) / 60.0,
+                    'max_memory_mb': stats['max_memory_mb'],
+                    'success_rate_percent': (stats['success_count'] / max(1, total_urls)) * 100,
+                }
+                
+                # Add policy stats if available
+                if stats['policy_stats']:
+                    domain_entry['policy_stats'] = stats['policy_stats']
+                
+                domain_data[domain] = domain_entry
+                # Update totals
+                total_domains += 1
+                totals_accumulator['total_urls'] += total_urls
+                totals_accumulator['success_count'] += stats['success_count']
+                totals_accumulator['skipped_count'] += stats['skipped_count']
+                totals_accumulator['not_found_count'] += stats['not_found_count']
+                totals_accumulator['failed_count'] += stats['failed_count']
+                totals_accumulator['total_size_bytes'] += stats['total_size_bytes']
+                totals_accumulator['total_crawl_time_seconds'] += total_crawl_time
+        
+        # Append overall summary in GB and minutes
+        summary = {
+            'total_domains': total_domains,
+            'total_urls': totals_accumulator['total_urls'],
+            'success_count': totals_accumulator['success_count'],
+            'skipped_count': totals_accumulator['skipped_count'],
+            'not_found_count': totals_accumulator['not_found_count'],
+            'failed_count': totals_accumulator['failed_count'],
+            'total_size_bytes': totals_accumulator['total_size_bytes'],
+            'total_size_mb': totals_accumulator['total_size_bytes'] / 1024 / 1024,
+            'total_size_gb': totals_accumulator['total_size_bytes'] / 1_000_000_000,
+            'total_crawl_time_seconds': totals_accumulator['total_crawl_time_seconds'],
+            'total_crawl_time_minutes': totals_accumulator['total_crawl_time_seconds'] / 60.0,
+        }
+
+        # Write to JSON file
+        try:
+            with open(output_file, 'w') as f:
+                # Write domain data with trailing summary block
+                domain_data_with_summary = dict(domain_data)
+                domain_data_with_summary['summary'] = summary
+                json.dump(domain_data_with_summary, f, indent=2)
+            print(f"\n✓ Domain statistics written to: {output_file}")
+            return str(output_file)
+        except Exception as e:
+            print(f"\n✗ Failed to write domain stats to JSON: {e}")
+            return None
 
 
 # Global metrics instance
