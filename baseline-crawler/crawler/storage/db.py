@@ -30,10 +30,32 @@ def get_connection():
     pool = _get_pool()
     return pool.get_connection()
 
+def fetch_active_sites():
+    """
+    Fetch all active sites from the sites table.
+    Returns: list of (siteid, url, custid, app_type) tuples.
+    These become the seeds for the crawler.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT siteid, url, custid, app_type 
+            FROM sites 
+            WHERE is_active = 1 OR is_active IS NULL
+            ORDER BY siteid ASC
+        """)
+        sites = cursor.fetchall()
+        return sites
+    finally:
+        cursor.close()
+        conn.close()
+
 def initialize_db():
     """
     Initialize the centralized MySQL database with required tables.
-    Only keep: sites, crawl_metrics, defacement_sites, defacement_details.
+    Only keep: sites, crawled_urls, defacement_sites, defacement_details.
+    TEMP: crawl_metrics disabled for MVP.
     This is idempotent - safe to call multiple times.
     """
     conn = get_connection()
@@ -56,21 +78,21 @@ def initialize_db():
             """
         )
 
-        # Crawl metrics table
-        cursor.execute(
-            """
-        CREATE TABLE IF NOT EXISTS crawl_metrics (
-            id INT PRIMARY KEY AUTO_INCREMENT,
-            url VARCHAR(255),
-            fetch_status INT,
-            speed_ms FLOAT,
-            size_bytes INT,
-            time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_url (url),
-            INDEX idx_time (time)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-            """
-        )
+        # TEMP DISABLED: crawl_metrics not used for MVP
+        # cursor.execute(
+        #     """
+        # CREATE TABLE IF NOT EXISTS crawl_metrics (
+        #     id INT PRIMARY KEY AUTO_INCREMENT,
+        #     url VARCHAR(255),
+        #     fetch_status INT,
+        #     speed_ms FLOAT,
+        #     size_bytes INT,
+        #     time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        #     INDEX idx_url (url),
+        #     INDEX idx_time (time)
+        # ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        #     """
+        # )
 
         # Defacement monitoring sites
         cursor.execute(
@@ -112,6 +134,31 @@ def initialize_db():
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """
         )
+
+        # Crawled URLs output table (stores crawl results per siteid)
+        cursor.execute(
+            """
+        CREATE TABLE IF NOT EXISTS crawled_urls (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            siteid INT NOT NULL,
+            url VARCHAR(255),
+            http_status INT,
+            crawl_depth INT,
+            crawled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_siteid (siteid),
+            INDEX idx_url (url)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+
+        # Add is_active column to sites if it doesn't exist (for seed filtering)
+        try:
+            cursor.execute("ALTER TABLE sites ADD COLUMN is_active TINYINT(1) DEFAULT 1")
+        except mysql.connector.Error as err:
+            if err.errno == 1060:  # Duplicate column
+                pass
+            else:
+                print(f"[DB] Warning: could not add is_active column: {err}")
 
         conn.commit()
         print("[DB] All tables initialized successfully")
