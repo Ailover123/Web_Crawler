@@ -3,6 +3,7 @@
 # - prevent duplicate crawling within a single run
 # - enforce maximum crawl depth
 from collections import deque
+from crawler.policy import URLPolicy
 
 
 class CrawlQueue:
@@ -52,13 +53,5 @@ class CrawlQueue:
         return url in self.queued
 
     def is_allowed_to_crawl(self, url):
-        blocked_exts = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.zip', '.rar', '.exe', '.tar', '.gz', '.mp3', '.mp4', '.avi', '.mov', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx']
-        from urllib.parse import urlparse
-        try:
-            path = urlparse(url).path.lower()
-            for e in blocked_exts:
-                if path.endswith(e):
-                    return False
-        except Exception:
-            return False
-        return True
+        # Delegate to centralized policy: blocks assets, taxonomy paths, etc.
+        return URLPolicy.should_crawl(url)
