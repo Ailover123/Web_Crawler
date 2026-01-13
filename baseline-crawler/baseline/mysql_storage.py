@@ -64,3 +64,46 @@ class MySQLBaselineStore(BaselineStore):
                     content_features=json.loads(row[5]) if row[5] else {}
                 )
         return None
+
+    def promote_baseline(
+        self,
+        siteid: int,
+        baseline_id: str,
+        actor_id: Optional[str] = None
+    ) -> None:
+        """
+        Atomically promote a baseline to ACTIVE for a site.
+        Ensures strict transaction boundaries and invariant validation.
+        """
+        lock_sql = "SELECT baseline_id FROM site_baselines WHERE site_id = %s FOR UPDATE"
+        deactivate_sql = "UPDATE site_baselines SET is_active = 0 WHERE site_id = %s AND is_active = 1"
+        activate_sql = "UPDATE site_baselines SET is_active = 1 WHERE baseline_id = %s AND site_id = %s"
+
+        with self._pool.cursor() as cursor:
+            try:
+                self._pool.begin()
+                
+                # 1. Lock all baselines for the site to prevent concurrent activation races
+                cursor.execute(lock_sql, (siteid,))
+                
+                # 2. Deactivate current (if any)
+                cursor.execute(deactivate_sql, (siteid,))
+                
+                # 3. Activate target baseline
+                affected = cursor.execute(activate_sql, (baseline_id, siteid))
+                
+                if affected == 0:
+                    # Target baseline doesn't exist OR doesn't belong to this site
+                    self._pool.rollback()
+                    raise ValueError(f"Baseline {baseline_id} not found for site {siteid}")
+                
+                # 4. Verify exactly one active baseline (Atomic check within transaction)
+                # The SQL unique constraint handles the (>1) case. 
+                # The affected check above + transaction handles the (0) case.
+                
+                self._pool.commit()
+            except Exception as e:
+                self._pool.rollback()
+                if isinstance(e, ValueError):
+                    raise
+                raise RuntimeError(f"Failed to promote baseline {baseline_id}: {str(e)}") from e

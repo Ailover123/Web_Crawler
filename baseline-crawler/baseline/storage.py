@@ -21,3 +21,17 @@ class BaselineStore(ABC):
     def get_profile(self, baseline_id: str, normalized_url: str) -> Optional[BaselineProfile]:
         """Retrieve a specific profile within a site baseline."""
         pass
+
+    @abstractmethod
+    def promote_baseline(
+        self,
+        siteid: int,
+        baseline_id: str,
+        actor_id: Optional[str] = None
+    ) -> None:
+        """
+        Atomically promote a baseline to ACTIVE for a site.
+        Raises an exception if the baseline does not belong to the site
+        or if promotion invariants are violated.
+        """
+        pass
