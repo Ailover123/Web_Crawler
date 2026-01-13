@@ -75,6 +75,10 @@ class MySQLBaselineStore(BaselineStore):
         Atomically promote a baseline to ACTIVE for a site.
         Ensures strict transaction boundaries and invariant validation.
         """
+        # NOTE: actor_id is currently intentionally ignored at the storage layer.
+        # It is accepted to maintain interface compatibility for future auditing.
+
+        validate_sql = "SELECT baseline_id FROM site_baselines WHERE baseline_id = %s AND site_id = %s"
         lock_sql = "SELECT baseline_id FROM site_baselines WHERE site_id = %s FOR UPDATE"
         deactivate_sql = "UPDATE site_baselines SET is_active = 0 WHERE site_id = %s AND is_active = 1"
         activate_sql = "UPDATE site_baselines SET is_active = 1 WHERE baseline_id = %s AND site_id = %s"
@@ -83,23 +87,21 @@ class MySQLBaselineStore(BaselineStore):
             try:
                 self._pool.begin()
                 
-                # 1. Lock all baselines for the site to prevent concurrent activation races
-                cursor.execute(lock_sql, (siteid,))
-                
-                # 2. Deactivate current (if any)
-                cursor.execute(deactivate_sql, (siteid,))
-                
-                # 3. Activate target baseline
-                affected = cursor.execute(activate_sql, (baseline_id, siteid))
-                
-                if affected == 0:
-                    # Target baseline doesn't exist OR doesn't belong to this site
+                # 1. Validation Read: Ensure target baseline exists AND belongs to the site
+                # This ensures chronological/ownership integrity before we mutate anything.
+                cursor.execute(validate_sql, (baseline_id, siteid))
+                if not cursor.fetchone():
                     self._pool.rollback()
                     raise ValueError(f"Baseline {baseline_id} not found for site {siteid}")
+
+                # 2. Lock all baselines for the site to prevent concurrent activation races
+                cursor.execute(lock_sql, (siteid,))
                 
-                # 4. Verify exactly one active baseline (Atomic check within transaction)
-                # The SQL unique constraint handles the (>1) case. 
-                # The affected check above + transaction handles the (0) case.
+                # 3. Deactivate current (if any)
+                cursor.execute(deactivate_sql, (siteid,))
+                
+                # 4. Activate target baseline
+                cursor.execute(activate_sql, (baseline_id, siteid))
                 
                 self._pool.commit()
             except Exception as e:

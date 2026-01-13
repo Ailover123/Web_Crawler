@@ -16,14 +16,16 @@ class TestBaselinePromotion(unittest.TestCase):
     def test_successful_promotion(self):
         """Scenario: Target baseline exists and belongs to site."""
         mock_cursor = self.mock_pool.cursor.return_value.__enter__.return_value
-        # Affected rows = 1 (successful activation)
+        # Sequence: Validate (Fetch 1) -> Lock -> Deactivate -> Activate
+        mock_cursor.fetchone.return_value = (self.baseline_id,)
         mock_cursor.execute.side_effect = [
+            None, # SELECT validate
             None, # SELECT FOR UPDATE
             1,    # UPDATE is_active = 0
             1     # UPDATE is_active = 1
         ]
 
-        self.store.promote_baseline(self.siteid, self.baseline_id)
+        self.store.promote_baseline(self.siteid, self.baseline_id, actor_id="admin_123")
         
         # Verify transaction sequence
         self.mock_pool.begin.assert_called_once()
@@ -31,13 +33,12 @@ class TestBaselinePromotion(unittest.TestCase):
         self.mock_pool.rollback.assert_not_called()
 
     def test_failed_promotion_wrong_site(self):
-        """Scenario: Baseline does not exist or belongs to another site."""
+        """Scenario: Baseline does not exist or belongs to another site (caught by validation read)."""
         mock_cursor = self.mock_pool.cursor.return_value.__enter__.return_value
-        # Affected rows = 0 for activation step
+        # Sequence: Validate (Fetch None) -> Rollback
+        mock_cursor.fetchone.return_value = None
         mock_cursor.execute.side_effect = [
-            None, # SELECT FOR UPDATE
-            1,    # UPDATE is_active = 0
-            0     # UPDATE is_active = 1 (FAILED)
+            None, # SELECT validate
         ]
 
         with self.assertRaises(ValueError) as cm:
