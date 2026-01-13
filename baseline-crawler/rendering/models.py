@@ -14,6 +14,9 @@ class RenderedArtifact:
     """
     Immutable post-JS DOM snapshot.
     Invariant: Tied to exactly one CrawlArtifact via artifact_id.
+    NOTE: Rendered artifacts are best-effort enrichment and may not exist 
+    for all crawl artifacts. Downstream consumers (Detection) must handle 
+    optionality explicitly.
     """
     rendered_artifact_id: str
     artifact_id: str # Link to crawl_artifacts.artifact_id

@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS task_store (
     
     PRIMARY KEY (session_id, normalized_url),
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id),
-    INDEX idx_state_priority (session_id, state, priority)
+    INDEX idx_state_priority (session_id, state, priority),
+    -- COVERING INDEX: Optimized for heartbeat recovery/crash detection
+    INDEX idx_session_state_heartbeat (session_id, state, last_heartbeat)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
