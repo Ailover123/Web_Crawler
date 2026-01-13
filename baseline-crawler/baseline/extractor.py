@@ -1,7 +1,8 @@
 import hashlib
 import re
+from collections import Counter
 from datetime import datetime
-from typing import Tuple, Optional, Dict, Any, Union
+from typing import Tuple, Optional, Dict, Any, Union, List
 from enum import Enum
 
 from crawler.models import CrawlArtifact
@@ -45,8 +46,10 @@ class BaselineExtractor:
             
             # FEATURE EXTRACTION: Structural Distillation
             # Responsibility: Remove unstable/dynamic elements before hashing
-            structural_html = self._distill_structure(content)
+            tags = self._get_tag_skeleton(content)
+            structural_html = "".join(tags)
             structural_digest = hashlib.sha256(structural_html.encode('utf-8')).hexdigest()
+            structural_features = dict(Counter(tags))
 
             # FEATURE EXTRACTION: Content Features
             features = self._extract_features(content)
@@ -60,6 +63,7 @@ class BaselineExtractor:
                 normalized_url=artifact.normalized_url,
                 baseline_id=deterministic_id,
                 structural_digest=structural_digest,
+                structural_features=structural_features,
                 content_features=features,
                 extraction_version=self._version,
                 created_at=datetime.utcnow()
@@ -71,7 +75,7 @@ class BaselineExtractor:
             # INVARIANT: No side-effects (logging handled by caller).
             return BaselineFailure.PROCESS_FAILED
 
-    def _distill_structure(self, html: str) -> str:
+    def _get_tag_skeleton(self, html: str) -> List[str]:
         """
         Strips dynamic and content-heavy data to produce a stable 'skeleton'.
         - Removes Script/Style/Comments
@@ -89,9 +93,7 @@ class BaselineExtractor:
         html = re.sub(r'<style.*?>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
         
         # Remove all text nodes (retain only tag structure)
-        # This creates a "Tag Skeleton"
-        tags = re.findall(r'<([a-zA-Z0-9]+).*?>', html)
-        return "".join(tags)
+        return re.findall(r'<([a-zA-Z0-9]+).*?>', html)
 
     def _extract_features(self, html: str) -> Dict[str, Any]:
         """
