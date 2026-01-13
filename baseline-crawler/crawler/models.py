@@ -21,8 +21,10 @@ class CrawlTask:
 class CrawlArtifact:
     """
     Output schema for the Crawl Phase.
-    Represents exact capture of the network response.
+    Represents exact capture of the network response for a specific session.
     """
+    artifact_id: str # Deterministic hash
+    session_id: str
     crawl_task_id: str
     attempt_number: int
     normalized_url: str

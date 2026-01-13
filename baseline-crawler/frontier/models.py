@@ -14,8 +14,9 @@ class TaskState(Enum):
 class FrontierTask:
     """
     Data model for a Frontier task.
-    Invariants: normalized_url is the Primary Key.
+    Invariants: Identity is (session_id, normalized_url).
     """
+    session_id: str
     normalized_url: str
     state: TaskState
     attempt_count: int = 0

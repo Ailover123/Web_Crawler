@@ -23,8 +23,8 @@ class DetectionVerdict:
     Phase 5 Invariant: Deterministic linkage to Baseline and Artifact.
     """
     verdict_id: str
-    normalized_url: str
-    baseline_id: str
+    artifact_id: str # Link to crawl_artifacts.artifact_id
+    baseline_id: str # Link to site_baselines.baseline_id
     status: DetectionStatus
     severity: DetectionSeverity
     confidence: float

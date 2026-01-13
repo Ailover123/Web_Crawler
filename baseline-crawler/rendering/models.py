@@ -13,14 +13,12 @@ class RenderStatus(Enum):
 class RenderedArtifact:
     """
     Immutable post-JS DOM snapshot.
-    Invariant: Tied to exactly one CrawlArtifact via parent_id and attempt.
+    Invariant: Tied to exactly one CrawlArtifact via artifact_id.
     """
     rendered_artifact_id: str
-    normalized_url: str
-    parent_artifact_id: str
-    attempt_number: int
-    status: RenderStatus
+    artifact_id: str # Link to crawl_artifacts.artifact_id
     rendered_body: Optional[str] = None
+    status: RenderStatus
     js_error_log: List[str] = field(default_factory=list)
     render_duration_ms: int = 0
     rendering_version: str = "v1"

@@ -22,6 +22,7 @@ class Frontier:
         """
         for url in urls:
             task = FrontierTask(
+                session_id=self._store.session_id,
                 normalized_url=url,
                 state=TaskState.PENDING, # Transition DISCOVERED -> PENDING folded into creation
                 depth=depth

@@ -6,12 +6,12 @@ from typing import Dict, Any
 class BaselineProfile:
     """
     Data model for Phase 4: Baseline Generation.
-    Represents an immutable ground-truth profile of a site's structure and content.
+    Represents an immutable ground-truth profile linked to a global site baseline.
     """
+    profile_id: str # Deterministic: sha256(baseline_id + normalized_url)
+    baseline_id: str # Link to site_baselines.baseline_id
     normalized_url: str
-    baseline_id: str
     structural_digest: str
-    structural_features: Dict[str, int] # Tag counts for continuous drift
+    structural_features: Dict[str, int]
     content_features: Dict[str, Any]
-    extraction_version: str
     created_at: datetime = field(default_factory=datetime.utcnow)

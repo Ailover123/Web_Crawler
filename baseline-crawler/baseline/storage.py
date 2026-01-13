@@ -4,21 +4,20 @@ from baseline.models import BaselineProfile
 
 class BaselineStore(ABC):
     """
-    Abstract interface for storing BaselineProfiles.
-    Selection Rule: At most one ACTIVE profile per (url, version).
+    Abstract interface for managing versioned site baselines and immutable profiles.
     """
 
     @abstractmethod
-    def save(self, profile: BaselineProfile) -> None:
-        """
-        Atomically persist an immutable BaselineProfile.
-        Must fail if baseline_id already exists.
-        """
+    def get_active_baseline_id(self, site_id: int) -> Optional[str]:
+        """Retrieve the ID of the currently ACTIVE baseline for a site."""
         pass
 
     @abstractmethod
-    def get_latest(self, normalized_url: str, extraction_version: str) -> Optional[BaselineProfile]:
-        """
-        Retrieve the most recent profile matching the url and version.
-        """
+    def save_profile(self, profile: BaselineProfile) -> None:
+        """Atomically persist a profile. Must fail if profile_id exists."""
+        pass
+
+    @abstractmethod
+    def get_profile(self, baseline_id: str, normalized_url: str) -> Optional[BaselineProfile]:
+        """Retrieve a specific profile within a site baseline."""
         pass
