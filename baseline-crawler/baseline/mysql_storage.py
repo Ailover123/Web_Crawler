@@ -79,7 +79,7 @@ class MySQLBaselineStore(BaselineStore):
         # It is accepted to maintain interface compatibility for future auditing.
 
         validate_sql = "SELECT baseline_id FROM site_baselines WHERE baseline_id = %s AND site_id = %s"
-        lock_sql = "SELECT baseline_id FROM site_baselines WHERE site_id = %s FOR UPDATE"
+        lock_sql = "SELECT baseline_id FROM site_baselines WHERE site_id = %s AND is_active = 1 FOR UPDATE"
         deactivate_sql = "UPDATE site_baselines SET is_active = 0 WHERE site_id = %s AND is_active = 1"
         activate_sql = "UPDATE site_baselines SET is_active = 1 WHERE baseline_id = %s AND site_id = %s"
 
