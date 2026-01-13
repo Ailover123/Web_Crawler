@@ -18,6 +18,7 @@
 | `normalized_url` | String | **Primary Link**. Identity of the site. |
 | `baseline_id` | UUID/String | Unique instance ID for this specific profile. |
 | `structural_digest` | String | Cryptographic hash of the skeleton/DOM structure (stripped of text). |
+| `structural_features` | Map<String, Int> | Quantitative tag counts used for continuous drift analysis. |
 | `content_features` | Map<String, Any> | Aggregated features (title, meta-tags, anchor text density, etc.). |
 | `extraction_version` | String | Versioning string for the logic used during extraction. |
 | `created_at` | Timestamp | Duration-stable creation time of the profile. |
