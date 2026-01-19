@@ -1,9 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 import dataclasses
 
 from frontier.models import FrontierTask, TaskState
 from frontier.storage import TaskStore
+from crawler.policy import URLPolicy
+from crawler.config import REQUEST_TIMEOUT, USER_AGENT
+from crawler.models import CrawlTask
 
 class Frontier:
     """
@@ -19,38 +22,41 @@ class Frontier:
     def discover(self, urls: List[str], depth: int) -> None:
         """
         Deduplication Rule: Enforced atomically via create_if_absent.
+        Policy Flow: URLs are filtered through URLPolicy BEFORE enqueuing.
         """
         for url in urls:
+            # Apply policy filtering before enqueuing
+            if not URLPolicy.should_crawl(url):
+                continue
+
             task = FrontierTask(
                 session_id=self._store.session_id,
                 normalized_url=url,
-                state=TaskState.PENDING, # Transition DISCOVERED -> PENDING folded into creation
+                state=TaskState.PENDING,
                 depth=depth
             )
             # INVARIANT: Atomic create-if-absent prevents duplicate task races.
             self._store.create_if_absent(task)
 
+    def prepare_crawl_task(self, frontier_task: FrontierTask) -> CrawlTask:
+        """
+        Inject configuration constants into the unit of work.
+        This provides the integration seam between Phase 2 and Phase 3.
+        """
+        return CrawlTask(
+            crawl_task_id=f"{frontier_task.session_id}:{frontier_task.normalized_url}",
+            attempt_number=frontier_task.attempt_count,
+            normalized_url=frontier_task.normalized_url,
+            user_agent=USER_AGENT,
+            timeout_ms=REQUEST_TIMEOUT * 1000 # Convert to milliseconds
+        )
+
     def assign_next(self) -> Optional[FrontierTask]:
         """
         PENDING -> ASSIGNED transition.
-        Uses CAS to ensure one-and-only-one worker assignment.
+        Delegates to next_pending() which handles CAS internally.
         """
-        task = self._store.next_pending()
-        if not task:
-            return None
-
-        assigned_task = dataclasses.replace(
-            task,
-            state=TaskState.ASSIGNED,
-            attempt_count=task.attempt_count + 1,
-            last_heartbeat=datetime.utcnow()
-        )
-        
-        # INVARIANT: Transition only if still PENDING. Prevents double-assignment races.
-        if self._store.transition(task.normalized_url, TaskState.PENDING, assigned_task):
-            return assigned_task
-        
-        return None # Someone else won the race
+        return self._store.next_pending()
 
     def report_success(self, normalized_url: str) -> None:
         """
@@ -98,6 +104,6 @@ class Frontier:
         """
         task = self._store.get(normalized_url)
         if task and task.state == TaskState.ASSIGNED:
-            active_task = dataclasses.replace(task, last_heartbeat=datetime.utcnow())
+            active_task = dataclasses.replace(task, last_heartbeat=datetime.now(timezone.utc))
             # INVARIANT: CAS ensures heartbeats never resurrect a recovered/completed task.
             self._store.transition(normalized_url, TaskState.ASSIGNED, active_task)

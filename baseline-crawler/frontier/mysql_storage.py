@@ -1,6 +1,6 @@
 import pymysql
 import dataclasses
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 from frontier.models import FrontierTask, TaskState
 from frontier.storage import TaskStore
@@ -37,53 +37,66 @@ class MySQLTaskStore(TaskStore):
 
     def next_pending(self) -> Optional[FrontierTask]:
         """
-        Find and atomically transition the next PENDING task to ASSIGNED.
-        Ensures FOR UPDATE SKIP LOCKED works within a transaction boundary.
+        Find and atomically assign the next PENDING task.
+        Uses Compare-And-Swap (CAS) pattern for MariaDB compatibility.
+        SKIP LOCKED is not supported in MariaDB shipped with XAMPP.
         """
-        select_sql = """
-            SELECT session_id, normalized_url, state, attempt_count, last_heartbeat, priority, depth
-            FROM task_store
-            WHERE session_id = %s AND state = 'PENDING'
-            ORDER BY priority DESC, last_heartbeat ASC
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-        """
-        update_sql = """
-            UPDATE task_store 
-            SET state = 'ASSIGNED', attempt_count = attempt_count + 1, last_heartbeat = %s
-            WHERE session_id = %s AND normalized_url = %s AND state = 'PENDING'
-        """
-
-        with self._pool.cursor() as cursor:
-            try:
-                # 1. Start Explicit Transaction
-                self._pool.begin()
-                
-                # 2. Select with Lock
+        # Bounded retry loop for CAS contention
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            # 1. Select candidate task (no locking)
+            select_sql = """
+                SELECT normalized_url
+                FROM task_store
+                WHERE session_id = %s AND state = 'PENDING'
+                ORDER BY priority DESC, last_heartbeat ASC
+                LIMIT 1
+            """
+            
+            with self._pool.cursor() as cursor:
                 cursor.execute(select_sql, (self._session_id,))
                 row = cursor.fetchone()
-                if not row:
-                    self._pool.rollback()
-                    return None
-
-                # 3. Update within valid lock
-                now = datetime.utcnow()
-                cursor.execute(update_sql, (now, self._session_id, row[1]))
                 
-                # 4. Commit and return the updated task
+                if not row:
+                    return None  # No pending tasks
+                
+                candidate_url = row[0]
+            
+            # 2. Attempt atomic CAS transition
+            now = datetime.now(timezone.utc)
+            update_sql = """
+                UPDATE task_store
+                SET state = 'ASSIGNED',
+                    attempt_count = attempt_count + 1,
+                    last_heartbeat = %s
+                WHERE session_id = %s
+                  AND normalized_url = %s
+                  AND state = 'PENDING'
+            """
+            
+            with self._pool.cursor() as cursor:
+                affected = cursor.execute(update_sql, (now, self._session_id, candidate_url))
                 self._pool.commit()
-                return FrontierTask(
-                    session_id=row[0],
-                    normalized_url=row[1],
-                    state=TaskState.ASSIGNED,
-                    attempt_count=row[3] + 1,
-                    last_heartbeat=now,
-                    priority=row[5],
-                    depth=row[6]
-                )
-            except Exception:
-                self._pool.rollback()
-                raise
+                
+                if affected > 0:
+                    # CAS succeeded - fetch and return the updated task
+                    fetch_sql = """
+                        SELECT session_id, normalized_url, state, attempt_count, 
+                               last_heartbeat, priority, depth
+                        FROM task_store
+                        WHERE session_id = %s AND normalized_url = %s
+                    """
+                    cursor.execute(fetch_sql, (self._session_id, candidate_url))
+                    task_row = cursor.fetchone()
+                    
+                    if task_row:
+                        return self._row_to_task(task_row)
+                
+                # CAS failed (another worker won) - retry
+        
+        # All retries exhausted
+        return None
 
     def transition(
         self,
