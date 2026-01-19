@@ -308,6 +308,23 @@ class CrawlSessionManager:
             # Failure is logged but doesn't abort the session (best-effort legacy sink)
             print(f"LEGACY_STORAGE_ERROR: Failed to persist {full_url}: {e}")
 
+    def _get_db_size_mb(self):
+        """Calculates total storage used by the crawler database in MB."""
+        try:
+            with self.connection.cursor() as cursor:
+                # Query information_schema for the specific database
+                db_name = DB_CONFIG['db']
+                sql = """
+                    SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) 
+                    FROM information_schema.TABLES 
+                    WHERE table_schema = %s
+                """
+                cursor.execute(sql, (db_name,))
+                size_mb = cursor.fetchone()[0]
+                return size_mb if size_mb is not None else 0.0
+        except Exception:
+            return 0.0
+
     def _print_summary(self, site, baseline_state_log):
         """Unified Terminal Summary (Architecture Locked)"""
         duration = time.time() - self.start_time
@@ -316,6 +333,8 @@ class CrawlSessionManager:
         with self.connection.cursor() as cursor:
             cursor.execute("SELECT COUNT(*) FROM detection_verdicts WHERE session_id = %s", (self.session_id,))
             total_verdicts = cursor.fetchone()[0]
+            
+        db_size_mb = self._get_db_size_mb()
 
         # Mandatory Key Verification: All policy keys MUST be displayed.
         print("\n==============================")
@@ -335,6 +354,7 @@ class CrawlSessionManager:
         print(f"Baseline State:   {baseline_state_log}")
         print(f"Detection Verdicts: {total_verdicts}")
         print(f"Approx Artifacts: {policy_stats.get('allowed', 0)}")
+        print(f"Total DB Usage:   {db_size_mb} MB (Real-time)")
         print("==============================\n")
 
 if __name__ == "__main__":
