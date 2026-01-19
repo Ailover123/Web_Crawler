@@ -3,7 +3,7 @@ import hashlib
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
-from crawler.models import CrawlArtifact
+from crawler.models import CrawlResponse
 from baseline.models import BaselineProfile
 from detection.models import DetectionVerdict, DetectionStatus, DetectionSeverity
 import detection.extraction.v1 as extraction_v1
@@ -21,7 +21,7 @@ class DefacementDetector:
 
     def analyze(
         self, 
-        artifact: CrawlArtifact, 
+        artifact: CrawlResponse, 
         baseline: BaselineProfile, 
         policy: Optional[Dict[str, Any]] = None
     ) -> DetectionVerdict:

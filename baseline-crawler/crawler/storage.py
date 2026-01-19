@@ -1,14 +1,15 @@
 from abc import ABC, abstractmethod
-from crawler.models import CrawlArtifact
+from crawler.models import CrawlResponse
 
 class ArtifactWriter(ABC):
     """
-    Abstract interface for writing CrawlArtifacts.
-    Follows Phase 3 architecture: Crawl Phase MUST only write to the Artifact Store.
+    Abstract interface for logging crawl events.
+    Phase 1 Output: Metadata logging ONLY.
     """
     @abstractmethod
-    def write(self, artifact: CrawlArtifact) -> None:
+    def write(self, response: CrawlResponse) -> None:
         """
-        Atomically write exactly one CrawlArtifact to the persistent store.
+        Atomically write crawl metadata to history.
+        Raw body is explicitly ignored.
         """
         pass

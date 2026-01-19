@@ -18,18 +18,25 @@ class CrawlTask:
     proxy_config: Optional[Dict[str, Any]] = None
 
 @dataclass(frozen=True)
-class CrawlArtifact:
+class CrawlResponse:
     """
-    Output schema for the Crawl Phase.
-    Represents exact capture of the network response for a specific session.
+    Output of Phase 1: Crawl & Fetch.
+    Represents the raw network response in MEMORY.
+    
+    INVARIANT: This object is TRANSIENT.
+    It is passed to Phase 2 (Normalization) and then discarded.
+    The 'raw_body' is NEVER persisted to the database.
     """
-    artifact_id: str # Deterministic hash
     session_id: str
     crawl_task_id: str
     attempt_number: int
     normalized_url: str
     resolved_url: str
+    
+    # Payload (Transient)
     raw_body: bytes
+    
+    # Metadata
     http_status: int
     content_type: str
     response_headers: Dict[str, str]

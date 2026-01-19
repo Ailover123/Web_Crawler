@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Tuple, Optional, Dict, Any, Union, List
 from enum import Enum
 
-from crawler.models import CrawlArtifact
+from crawler.models import CrawlResponse
 from baseline.models import BaselineProfile
 
 class BaselineFailure(Enum):
@@ -25,7 +25,7 @@ class BaselineExtractor:
     def __init__(self, extraction_version: str):
         self._version = extraction_version
 
-    def generate(self, artifact: CrawlArtifact) -> Union[BaselineProfile, BaselineFailure]:
+    def generate(self, artifact: CrawlResponse) -> Union[BaselineProfile, BaselineFailure]:
         """
         Processes a CrawlArtifact into a BaselineProfile.
         Returns BaselineProfile on success, or BaselineFailure on error.

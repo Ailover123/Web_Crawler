@@ -1,11 +1,15 @@
 import time
+import hashlib
 import requests
-from datetime import datetime
-from typing import Optional, Dict, Any
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List, Tuple
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib.parse import urljoin
+from bs4 import BeautifulSoup
 
-from crawler.models import CrawlTask, CrawlArtifact
+from crawler.config import REQUEST_TIMEOUT, USER_AGENT, VERIFY_SSL_CERTIFICATE
+from crawler.models import CrawlTask, CrawlResponse
 from crawler.storage import ArtifactWriter
 
 class CrawlWorker:
@@ -32,15 +36,17 @@ class CrawlWorker:
         except Exception:
             return None
 
-    def execute(self, task: CrawlTask) -> None:
+    def execute(self, task: CrawlTask) -> Tuple[CrawlResponse, List[str]]:
         """
-        Processes a single CrawlTask and writes a CrawlArtifact.
-        Ensures an artifact is emitted even on failure.
+        Processes a single CrawlTask and writes a CrawlResponse log.
+        Ensures a response is emitted even on failure.
+        Returns: (response, extracted_urls)
         """
         # INVARIANT: Session is created per task to maintain statelessness.
         # Performance tradeoff is accepted for architectural purity.
         session = requests.Session()
         session.max_redirects = self._max_redirects
+        session.verify = VERIFY_SSL_CERTIFICATE
         
         # VIOLATION FIX: Retries are connection-level only. 
         # Status codes 4xx/5xx must NOT be retried to preserve attempt semantics.
@@ -57,11 +63,11 @@ class CrawlWorker:
         session.mount("http://", adapter)
         session.mount("https://", adapter)
 
-        headers = {}
-        if task.user_agent:
-            headers["User-Agent"] = task.user_agent
+        headers = {
+            "User-Agent": USER_AGENT
+        }
 
-        request_timestamp = datetime.utcnow().isoformat()
+        request_timestamp = datetime.now(timezone.utc).isoformat()
         start_time = time.perf_counter()
         
         try:
@@ -71,7 +77,7 @@ class CrawlWorker:
                 url=task.normalized_url,
                 headers=headers,
                 proxies=task.proxy_config,
-                timeout=task.timeout_ms / 1000.0,
+                timeout=REQUEST_TIMEOUT,
                 allow_redirects=True,
                 stream=False
             )
@@ -81,7 +87,10 @@ class CrawlWorker:
             # INVARIANT: Content-Type fallback
             content_type = response.headers.get("Content-Type", "application/octet-stream")
             
-            artifact = CrawlArtifact(
+            session_id = task.crawl_task_id.split(':')[0]  # Extract from crawl_task_id
+            
+            crawl_response = CrawlResponse(
+                session_id=session_id,
                 crawl_task_id=task.crawl_task_id,
                 attempt_number=task.attempt_number,
                 normalized_url=task.normalized_url,
@@ -97,10 +106,13 @@ class CrawlWorker:
 
         except (requests.exceptions.RequestException, Exception) as e:
             # VIOLATION FIX: Failure must be data, not absence.
-            # Emit a failure artifact for terminal network errors.
+            # Emit a failure response for terminal network errors.
             duration_ms = int((time.perf_counter() - start_time) * 1000)
             
-            artifact = CrawlArtifact(
+            session_id = task.crawl_task_id.split(':')[0]
+            
+            crawl_response = CrawlResponse(
+                session_id=session_id,
                 crawl_task_id=task.crawl_task_id,
                 attempt_number=task.attempt_number,
                 normalized_url=task.normalized_url,
@@ -114,5 +126,40 @@ class CrawlWorker:
                 remote_address=None
             )
 
-        # INVARIANT: Every attempt results in exactly one artifact.
-        self._writer.write(artifact)
+        # INVARIANT: Every attempt results in exactly one history log.
+        self._writer.write(crawl_response)
+        
+        # Extract links from successful HTML responses
+        extracted_urls = []
+        if crawl_response.http_status == 200 and crawl_response.content_type and 'text/html' in crawl_response.content_type:
+            extracted_urls = self._extract_links(crawl_response.raw_body, crawl_response.resolved_url)
+        
+        return crawl_response, extracted_urls
+    
+    def _extract_links(self, html_content: bytes, base_url: str) -> List[str]:
+        """
+        Extract all <a href> links from HTML and normalize to absolute URLs.
+        Returns empty list on parse errors (fail-safe).
+        """
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            links = []
+            
+            for anchor in soup.find_all('a', href=True):
+                href = anchor['href'].strip()
+                if not href:
+                    continue
+                
+                try:
+                    # Normalize to absolute URL
+                    absolute_url = urljoin(base_url, href)
+                    links.append(absolute_url)
+                except Exception:
+                    # Ignore malformed URLs
+                    continue
+            
+            return links
+        except Exception:
+            # Fail-safe: return empty list on parse errors
+            return []
+    

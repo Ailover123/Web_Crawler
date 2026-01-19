@@ -5,8 +5,6 @@ SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
 -- 1. LEGACY COMPATIBILITY TABLES
--- RESTORED: These schemas are exactly as in the old codebase.
--- DO NOT MODIFY COLUMNS, NAMES, OR TYPES.
 
 CREATE TABLE IF NOT EXISTS sites (
     siteid INT AUTO_INCREMENT PRIMARY KEY,
@@ -51,7 +49,7 @@ CREATE TABLE IF NOT EXISTS task_store (
     priority INT NOT NULL DEFAULT 0,
     depth INT NOT NULL DEFAULT 0,
     
-    PRIMARY KEY (session_id, normalized_url),
+    PRIMARY KEY (session_id, normalized_url(255)),
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id),
     INDEX idx_state_priority (session_id, state, priority),
     -- COVERING INDEX: Optimized for heartbeat recovery/crash detection
@@ -59,81 +57,92 @@ CREATE TABLE IF NOT EXISTS task_store (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
--- 4. ARTIFACTS (PHASES 3 & 6)
+-- 4. ARTIFACTS 
+-- Raw Body is NOT stored here. This is purely metadata logging.
 
-CREATE TABLE IF NOT EXISTS crawl_artifacts (
-    artifact_id CHAR(64) PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS crawl_history (
+    event_id CHAR(64) PRIMARY KEY,        -- Unique Event ID
     session_id CHAR(36) NOT NULL,
     normalized_url VARCHAR(2048) NOT NULL,
     attempt_number INT NOT NULL,
-    raw_body LONGBLOB,
     http_status INT NOT NULL,
     content_type VARCHAR(255),
     response_headers JSON,
-    request_timestamp TIMESTAMP(3) NOT NULL,
     
-    UNIQUE INDEX idx_session_url_attempt (session_id, normalized_url, attempt_number),
+    -- LINK TO NORMALIZED CONTENT (Nullable if no change/no match yet)
+    page_version_id CHAR(32) NULL, 
+    
+    created_at TIMESTAMP(3) NOT NULL,
+    
+    INDEX idx_session_url (session_id, normalized_url(255)),
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- PHASE 6: Optional Enrichment
-CREATE TABLE IF NOT EXISTS rendered_artifacts (
-    rendered_artifact_id CHAR(64) PRIMARY KEY,
-    artifact_id CHAR(64) NOT NULL,
-    rendered_body LONGTEXT,
-    render_status ENUM('SUCCESS', 'TIMEOUT', 'FAILED') NOT NULL,
-    js_error_log JSON,
-    render_timestamp TIMESTAMP(3) NOT NULL,
+
+-- 5. NORMALIZED STORAGE (PHASE 2)
+-- THE SINGLE SOURCE OF TRUTH FOR CONTENT
+
+CREATE TABLE IF NOT EXISTS page_versions (
+    page_version_id CHAR(32) PRIMARY KEY,       -- Hash of (url + content_hash + version)
+    url_hash CHAR(64) NOT NULL,                 -- SHA256(normalized_url) for fast lookups
+    content_hash CHAR(64) NOT NULL,             -- SHA256(normalized_text) for dedup
     
-    FOREIGN KEY (artifact_id) REFERENCES crawl_artifacts(artifact_id)
+    -- METADATA
+    title VARCHAR(512),
+    normalized_text MEDIUMTEXT,                 -- The Clean Content
+    normalization_version VARCHAR(10) DEFAULT 'v1',
+    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    
+    INDEX idx_url_hash (url_hash),
+    INDEX idx_content_hash (content_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
--- 5. BASELINES (PHASE 4)
+-- 6. BASELINES (PHASE 4)
+-- Refactored to point to page_versions
 
 CREATE TABLE IF NOT EXISTS site_baselines (
     baseline_id CHAR(64) PRIMARY KEY,
     site_id INT NOT NULL,
-    version INT NOT NULL,
+    
+    -- Pointer to the "Good" Version
+    page_version_id CHAR(32) NOT NULL,
+    
     is_active BOOLEAN NOT NULL DEFAULT 0,
-    created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    promoted_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     
     FOREIGN KEY (site_id) REFERENCES sites(siteid),
-    -- ENFORCEMENT: Only one active baseline per site
-    UNIQUE INDEX idx_single_active_per_site (site_id, (CASE WHEN is_active = 1 THEN 1 ELSE NULL END))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-CREATE TABLE IF NOT EXISTS baseline_profiles (
-    profile_id CHAR(64) PRIMARY KEY,
-    baseline_id CHAR(64) NOT NULL,
-    normalized_url VARCHAR(2048) NOT NULL,
-    structural_digest CHAR(64) NOT NULL,
-    structural_features JSON,
-    content_features JSON,
-    
-    FOREIGN KEY (baseline_id) REFERENCES site_baselines(baseline_id),
-    UNIQUE INDEX idx_baseline_url (baseline_id, normalized_url)
+    FOREIGN KEY (page_version_id) REFERENCES page_versions(page_version_id),
+    INDEX idx_site_active (site_id, is_active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
--- 6. DETECTION (PHASE 5)
+-- 7. DETECTION (PHASE 5)
 
 CREATE TABLE IF NOT EXISTS detection_verdicts (
     verdict_id CHAR(64) PRIMARY KEY,
     session_id CHAR(36) NOT NULL,
-    artifact_id CHAR(64) NOT NULL,
-    baseline_id CHAR(64) NOT NULL,
+    
+    -- Context
+    url_hash CHAR(64) NOT NULL,                 -- SHA256(normalized_url)
+    
+    -- The Comparison
+    previous_baseline_version_id CHAR(32) NOT NULL,
+    current_page_version_id CHAR(32) NOT NULL,
+    
+    -- The Verdict
     status ENUM('CLEAN', 'POTENTIAL_DEFACEMENT', 'DEFACED', 'FAILED') NOT NULL,
     severity ENUM('NONE', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL') NOT NULL,
     confidence FLOAT NOT NULL,
     structural_drift FLOAT NOT NULL,
     content_drift FLOAT NOT NULL,
     detected_indicators JSON,
+    
     analysis_timestamp TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
     FOREIGN KEY (session_id) REFERENCES crawl_sessions(session_id),
-    FOREIGN KEY (artifact_id) REFERENCES crawl_artifacts(artifact_id),
-    FOREIGN KEY (baseline_id) REFERENCES site_baselines(baseline_id),
+    FOREIGN KEY (previous_baseline_version_id) REFERENCES page_versions(page_version_id),
+    FOREIGN KEY (current_page_version_id) REFERENCES page_versions(page_version_id),
     INDEX idx_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
