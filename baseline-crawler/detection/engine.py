@@ -3,8 +3,7 @@ import hashlib
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
-from crawler.models import CrawlResponse
-from baseline.models import BaselineProfile
+from normalization.models import PageVersion
 from detection.models import DetectionVerdict, DetectionStatus, DetectionSeverity
 import detection.extraction.v1 as extraction_v1
 
@@ -21,8 +20,9 @@ class DefacementDetector:
 
     def analyze(
         self, 
-        artifact: CrawlResponse, 
-        baseline: BaselineProfile, 
+        current: PageVersion, 
+        baseline: PageVersion, 
+        session_id: str,
         policy: Optional[Dict[str, Any]] = None
     ) -> DetectionVerdict:
         """
@@ -36,42 +36,47 @@ class DefacementDetector:
         thresholds = policy.get("thresholds", {})
         
         # INVARIANT: Identity Mismatch Detection (Contract violation)
-        if artifact.normalized_url != baseline.normalized_url:
-            raise ValueError(f"Identity mismatch: {artifact.normalized_url} vs {baseline.normalized_url}")
+        if current.url_hash != baseline.url_hash:
+             # Fallback check on strings if hashes differ (hash collision extremely unlikely but good for debug)
+             if current.normalized_url != baseline.normalized_url:
+                raise ValueError(f"Identity mismatch: {current.normalized_url} vs {baseline.normalized_url}")
 
         # INVARIANT: Incompatible logic check
-        if baseline.extraction_version != self._version:
-             return self._create_failed_verdict(artifact, baseline, "INCOMPATIBLE_VERSION")
+        if baseline.normalization_version != self._version:
+             return self._create_failed_verdict(current, baseline, session_id, "INCOMPATIBLE_VERSION")
 
         try:
             # 1. PARITY EXTRACTION (Pinned v1 logic only)
-            content = artifact.raw_body.decode('utf-8', errors='replace')
-            curr_data = extraction_v1.distill_v1_features(content)
+            # We must re-extract features from the stored normalized text.
+            # In future, we might cache these features in PageVersion or a separate FeatureStore.
+            curr_data = extraction_v1.distill_v1_features(current.normalized_text)
+            base_data = extraction_v1.distill_v1_features(baseline.normalized_text)
 
             # 2. DRIFT CALCULATION
             # Structural drift: Continuous Jaccard Distance over tag bags.
-            # INVARIANT: Deterministic formula documented in turn 356 response.
             s_drift = self._calculate_structural_drift_continuous(
                 curr_data["structural_features"], 
-                baseline.structural_features
+                base_data["structural_features"]
             )
             
             # Content drift: Explicit mismatch ratio.
             c_drift = self._calculate_content_drift_explicit(
                 curr_data["content_features"], 
-                baseline.content_features
+                base_data["content_features"]
             )
 
             # 3. INDICATOR DETECTION
-            indicators = self._detect_indicators(s_drift, c_drift, curr_data, baseline)
+            indicators = self._detect_indicators(s_drift, c_drift, curr_data, base_data)
 
             # 4. DETERMINISTIC CLASSIFICATION
             status, severity, confidence = self._classify(s_drift, c_drift, indicators, thresholds)
 
             return DetectionVerdict(
                 verdict_id=str(uuid.uuid4()),
-                normalized_url=artifact.normalized_url,
-                baseline_id=baseline.baseline_id,
+                session_id=session_id,
+                url_hash=current.url_hash,
+                previous_baseline_version_id=baseline.page_version_id,
+                current_page_version_id=current.page_version_id,
                 status=status,
                 severity=severity,
                 confidence=confidence,
@@ -81,8 +86,8 @@ class DefacementDetector:
                 analysis_timestamp=datetime.utcnow()
             )
 
-        except Exception:
-            return self._create_failed_verdict(artifact, baseline, "PROCESS_FAILED")
+        except Exception as e:
+            return self._create_failed_verdict(current, baseline, session_id, f"PROCESS_FAILED: {str(e)}")
 
     def _calculate_structural_drift_continuous(self, current: Dict[str, int], baseline: Dict[str, int]) -> float:
         """
@@ -159,11 +164,13 @@ class DefacementDetector:
         
         return DetectionStatus.POTENTIAL_DEFACEMENT, DetectionSeverity.LOW, 0.5
 
-    def _create_failed_verdict(self, artifact, baseline, reason: str) -> DetectionVerdict:
+    def _create_failed_verdict(self, current, baseline, session_id, reason: str) -> DetectionVerdict:
         return DetectionVerdict(
             verdict_id=str(uuid.uuid4()),
-            normalized_url=artifact.normalized_url,
-            baseline_id=baseline.baseline_id,
+            session_id=session_id,
+            url_hash=current.url_hash,
+            previous_baseline_version_id=baseline.page_version_id if hasattr(baseline, 'page_version_id') else "UNKNOWN",
+            current_page_version_id=current.page_version_id if hasattr(current, 'page_version_id') else "UNKNOWN",
             status=DetectionStatus.FAILED,
             severity=DetectionSeverity.NONE,
             confidence=0.0,

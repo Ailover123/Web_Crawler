@@ -13,23 +13,30 @@ class MySQLDetectionVerdictStore(DetectionVerdictStore):
         self._pool = connection_pool
 
     def save(self, verdict: DetectionVerdict) -> None:
-        """Atomically persist a verdict."""
+        """
+        Persist a detection verdict.
+        Phase 5: Writes to detection_verdicts table.
+        """
         sql = """
             INSERT INTO detection_verdicts (
-                verdict_id, session_id, artifact_id, baseline_id,
-                status, severity, confidence, structural_drift,
-                content_drift, detected_indicators, analysis_timestamp
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                verdict_id, session_id, url_hash,
+                previous_baseline_version_id, current_page_version_id, 
+                status, severity, confidence, 
+                structural_drift, content_drift, detected_indicators, 
+                analysis_timestamp
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE verdict_id=verdict_id
         """
+        
         indicators_json = json.dumps(verdict.detected_indicators)
         
         with self._pool.cursor() as cursor:
             cursor.execute(sql, (
-                verdict.verdict_id, verdict.session_id, verdict.artifact_id, 
-                verdict.baseline_id, verdict.status.value, verdict.severity.value,
-                verdict.confidence, verdict.structural_drift,
-                verdict.content_drift, indicators_json, verdict.analysis_timestamp
+                verdict.verdict_id, verdict.session_id, verdict.url_hash,
+                verdict.previous_baseline_version_id, verdict.current_page_version_id,
+                verdict.status.value, verdict.severity.value, verdict.confidence,
+                verdict.structural_drift, verdict.content_drift, 
+                indicators_json, verdict.analysis_timestamp
             ))
             self._pool.commit()
 

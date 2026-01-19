@@ -190,42 +190,56 @@ class CrawlSessionManager:
                 self._persist_legacy_crawled_url(
                     site_id=site['siteid'],
                     full_url=task.normalized_url,
-                    status=artifact.http_status,
+                    status=response.http_status,
                     depth=task.depth
                 )
 
                 # Phase 4: Baseline Generation (Gated Invariant)
-                # TODO: REFACTOR FOR NEW ARCHITECTURE (Phase 4 is currently disabled)
                 # Gate: Mode matches 'baseline' AND no existing baseline for site
-                # if self.mode == "baseline" and not has_any_baseline:
-                #     profile = self.extractor.generate(artifact)
-                #     if hasattr(profile, 'baseline_id'):
-                #         # Architectural Invariant: ALWAYS created as INACTIVE
-                #         self._ensure_baseline_record(site['siteid'], profile.baseline_id)
-                #         self.baseline_store.save_profile(profile)
+                # In this mode, we TRUST the current content and promote it as truth.
+                if self.mode == "baseline" and not has_any_baseline:
+                    if page_version:
+                        self.baseline_store.promote_baseline(site['siteid'], page_version)
+                        # We do not verify promotion success; store raises if failed.
                 
                 # Phase 5: Defacement Detection (Gated Invariant)
-                # TODO: REFACTOR FOR NEW ARCHITECTURE (Phase 5 is currently disabled)
-                # Gate: Detection runs ONLY if an active baseline exists
-                # if active_baseline_id:
-                #     baseline_profile = self.baseline_store.get_profile(active_baseline_id, artifact.normalized_url)
-                #     if baseline_profile:
-                #         verdict = self.detector.analyze(artifact, baseline_profile)
-                #     else:
-                #         # Architectural Invariant: Missing from active baseline -> Treat as DEFACED
-                #         verdict = DetectionVerdict(
-                #             verdict_id=str(uuid.uuid4()),
-                #             normalized_url=artifact.normalized_url,
-                #             baseline_id=active_baseline_id,
-                #             status=DetectionStatus.DEFACED,
-                #             severity=DetectionSeverity.HIGH,
-                #             confidence=1.0,
-                #             structural_drift=1.0,
-                #             content_drift=1.0,
-                #             detected_indicators=["UNEXPECTED_URL"],
-                #             analysis_timestamp=datetime.now(timezone.utc)
-                #         )
-                #     self.detection_store.save(verdict)
+                # Gate: Detection runs ONLY if an active baseline exists for the site.
+                # If we are in 'baseline' mode but a baseline EXISTS, we still detect (safety).
+                if has_any_baseline and page_version:
+                    # 1. Fetch the Truth (Baseline Version for this URL)
+                    baseline_version = self.baseline_store.get_baseline_version(site['siteid'], page_version.url_hash)
+                    
+                    verdict = None
+                    if baseline_version:
+                        # 2. Compare Present vs Truth
+                        verdict = self.detector.analyze(
+                            current=page_version, 
+                            baseline=baseline_version, 
+                            session_id=self.session_id
+                        )
+                    else:
+                        # 3. Anomaly: URL exists now but was NOT in the baseline.
+                        # Architectural Invariant: Treat as HIGH severity anomaly (New Page Injection).
+                        # We create a pseudo-verdict for this structural violation.
+                        
+                        # We need to manually construct a Verdict since Detector expects two versions.
+                        verdict = DetectionVerdict(
+                            verdict_id=str(uuid.uuid4()),
+                            session_id=self.session_id,
+                            url_hash=page_version.url_hash,
+                            previous_baseline_version_id="NULL",
+                            current_page_version_id=page_version.page_version_id,
+                            status=DetectionStatus.DEFACED,
+                            severity=DetectionSeverity.HIGH,
+                            confidence=1.0,
+                            structural_drift=1.0,
+                            content_drift=1.0,
+                            detected_indicators=["UNEXPECTED_URL_INJECTION"],
+                            analysis_timestamp=datetime.now(timezone.utc)
+                        )
+                    
+                    if verdict:
+                        self.detection_store.save(verdict)
             else:
                 self.frontier.report_failure(task.normalized_url)
 

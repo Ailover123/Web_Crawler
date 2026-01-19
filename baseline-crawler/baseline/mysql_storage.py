@@ -1,111 +1,77 @@
-import json
+import hashlib
+import uuid
 from typing import Optional
-from baseline.models import BaselineProfile
-from baseline.storage import BaselineStore
+from datetime import datetime
+from baseline.models import SiteBaseline
+from normalization.models import PageVersion
 
-class MySQLBaselineStore(BaselineStore):
+class MySQLBaselineStore:
     """
-    MySQL implementation of BaselineStore.
-    Supports active baseline selection and profile storage.
+    Manages the 'Site Baseline' state.
+    A Baseline is simply a pointer to a specific 'Valid' PageVersion.
     """
-
     def __init__(self, connection_pool):
         self._pool = connection_pool
 
-    def get_active_baseline_id(self, site_id: int) -> Optional[str]:
-        """Retrieve the ID of the currently ACTIVE baseline for a site."""
-        sql = """
-            SELECT baseline_id FROM site_baselines
-            WHERE site_id = %s AND is_active = 1
-            LIMIT 1
+    def promote_baseline(self, site_id: int, page_version: PageVersion) -> SiteBaseline:
         """
-        with self._pool.cursor() as cursor:
-            cursor.execute(sql, (site_id,))
-            row = cursor.fetchone()
-            return row[0] if row else None
-
-    def save_profile(self, profile: BaselineProfile) -> None:
-        """Atomically persist a profile."""
-        sql = """
-            INSERT INTO baseline_profiles (
-                profile_id, baseline_id, normalized_url,
-                structural_digest, structural_features, content_features
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE profile_id=profile_id
+        Promotes a PageVersion to be the active baseline for this site/URL context.
         """
-        struct_features_json = json.dumps(profile.structural_features)
-        content_features_json = json.dumps(profile.content_features)
+        # Generate Baseline ID: SHA256(site_id + normalized_url) -> One active baseline per URL per Site
+        # We enforce one baseline per URL by using a deterministic ID.
+        baseline_id = hashlib.sha256(f"{site_id}:{page_version.url_hash}".encode('utf-8')).hexdigest()
+        
+        sql = """
+            INSERT INTO site_baselines (
+                baseline_id, site_id, page_version_id, is_active, promoted_at
+            ) VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                page_version_id = VALUES(page_version_id),
+                promoted_at = VALUES(promoted_at),
+                is_active = 1
+        """
         
         with self._pool.cursor() as cursor:
             cursor.execute(sql, (
-                profile.profile_id, profile.baseline_id, profile.normalized_url,
-                profile.structural_digest, struct_features_json, content_features_json
+                baseline_id, site_id, page_version.page_version_id, 
+                1, datetime.utcnow()
             ))
             self._pool.commit()
+            
+        return SiteBaseline(
+            baseline_id=baseline_id,
+            site_id=site_id,
+            page_version_id=page_version.page_version_id,
+            is_active=True
+        )
 
-    def get_profile(self, baseline_id: str, normalized_url: str) -> Optional[BaselineProfile]:
-        """Retrieve a specific profile."""
+    def get_baseline_version(self, site_id: int, url_hash: str) -> Optional[PageVersion]:
+        """
+        Retrieves the 'Good' PageVersion for a given URL on this site.
+        Joins site_baselines -> page_versions.
+        """
         sql = """
-            SELECT profile_id, baseline_id, normalized_url, 
-                   structural_digest, structural_features, content_features
-            FROM baseline_profiles
-            WHERE baseline_id = %s AND normalized_url = %s
+            SELECT pv.page_version_id, pv.url_hash, pv.content_hash, 
+                   pv.title, pv.normalized_text, pv.normalization_version, pv.created_at
+            FROM site_baselines sb
+            JOIN page_versions pv ON sb.page_version_id = pv.page_version_id
+            WHERE sb.site_id = %s AND pv.url_hash = %s AND sb.is_active = 1
         """
+        
         with self._pool.cursor() as cursor:
-            cursor.execute(sql, (baseline_id, normalized_url))
+            cursor.execute(sql, (site_id, url_hash))
             row = cursor.fetchone()
-            if row:
-                return BaselineProfile(
-                    profile_id=row[0],
-                    baseline_id=row[1],
-                    normalized_url=row[2],
-                    structural_digest=row[3],
-                    structural_features=json.loads(row[4]) if row[4] else {},
-                    content_features=json.loads(row[5]) if row[5] else {}
-                )
-        return None
-
-    def promote_baseline(
-        self,
-        siteid: int,
-        baseline_id: str,
-        actor_id: Optional[str] = None
-    ) -> None:
-        """
-        Atomically promote a baseline to ACTIVE for a site.
-        Ensures strict transaction boundaries and invariant validation.
-        """
-        # NOTE: actor_id is currently intentionally ignored at the storage layer.
-        # It is accepted to maintain interface compatibility for future auditing.
-
-        validate_sql = "SELECT baseline_id FROM site_baselines WHERE baseline_id = %s AND site_id = %s"
-        lock_sql = "SELECT baseline_id FROM site_baselines WHERE site_id = %s AND is_active = 1 FOR UPDATE"
-        deactivate_sql = "UPDATE site_baselines SET is_active = 0 WHERE site_id = %s AND is_active = 1"
-        activate_sql = "UPDATE site_baselines SET is_active = 1 WHERE baseline_id = %s AND site_id = %s"
-
-        with self._pool.cursor() as cursor:
-            try:
-                self._pool.begin()
-                
-                # 1. Validation Read: Ensure target baseline exists AND belongs to the site
-                # This ensures chronological/ownership integrity before we mutate anything.
-                cursor.execute(validate_sql, (baseline_id, siteid))
-                if not cursor.fetchone():
-                    self._pool.rollback()
-                    raise ValueError(f"Baseline {baseline_id} not found for site {siteid}")
-
-                # 2. Lock all baselines for the site to prevent concurrent activation races
-                cursor.execute(lock_sql, (siteid,))
-                
-                # 3. Deactivate current (if any)
-                cursor.execute(deactivate_sql, (siteid,))
-                
-                # 4. Activate target baseline
-                cursor.execute(activate_sql, (baseline_id, siteid))
-                
-                self._pool.commit()
-            except Exception as e:
-                self._pool.rollback()
-                if isinstance(e, ValueError):
-                    raise
-                raise RuntimeError(f"Failed to promote baseline {baseline_id}: {str(e)}") from e
+            
+            if not row:
+                return None
+            
+            return PageVersion(
+                page_version_id=row[0],
+                url_hash=row[1],
+                content_hash=row[2],
+                title=row[3],
+                normalized_text=row[4],
+                normalization_version=row[5],
+                created_at=row[6],
+                normalized_url="" # Not available in this join, but known by caller
+            )

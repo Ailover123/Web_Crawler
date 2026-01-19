@@ -1,17 +1,13 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Any
 
 @dataclass(frozen=True)
-class BaselineProfile:
+class SiteBaseline:
     """
-    Data model for Phase 4: Baseline Generation.
-    Represents an immutable ground-truth profile linked to a global site baseline.
+    Phase 4 Model: A promoted PageVersion that serves as the Source of Truth.
     """
-    profile_id: str # Deterministic: sha256(baseline_id + normalized_url)
-    baseline_id: str # Link to site_baselines.baseline_id
-    normalized_url: str
-    structural_digest: str
-    structural_features: Dict[str, int]
-    content_features: Dict[str, Any]
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    baseline_id: str
+    site_id: int
+    page_version_id: str
+    is_active: bool
+    promoted_at: datetime = field(default_factory=datetime.utcnow)

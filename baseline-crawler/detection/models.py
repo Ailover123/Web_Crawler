@@ -20,11 +20,19 @@ class DetectionSeverity(Enum):
 class DetectionVerdict:
     """
     Immutable result of a defacement analysis operation.
-    Phase 5 Invariant: Deterministic linkage to Baseline and Artifact.
+    Phase 5 Invariant: Comparison between two PageVersions.
     """
     verdict_id: str
-    artifact_id: str # Link to crawl_artifacts.artifact_id
-    baseline_id: str # Link to site_baselines.baseline_id
+    session_id: str
+    
+    # Context
+    url_hash: str
+    
+    # The Comparison
+    previous_baseline_version_id: str
+    current_page_version_id: str
+    
+    # Verdict Data
     status: DetectionStatus
     severity: DetectionSeverity
     confidence: float
