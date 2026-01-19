@@ -16,6 +16,10 @@ from crawler.config import DB_CONFIG, USER_AGENT, REQUEST_TIMEOUT, VERIFY_SSL_CE
 from crawler.policy import URLPolicy
 from crawler.worker import CrawlWorker
 from crawler.mysql_storage import MySQLArtifactStore
+from normalization.engine import NormalizationEngine
+from normalization.storage import MySQLPageVersionStore
+from normalization.engine import NormalizationEngine
+from normalization.storage import MySQLPageVersionStore
 
 from frontier.orchestrator import Frontier
 from frontier.mysql_storage import MySQLTaskStore
@@ -83,12 +87,14 @@ class CrawlSessionManager:
         # Initialize Stores (Phase-specific data persistence)
         self.task_store = MySQLTaskStore(self.connection, self.session_id)
         self.artifact_store = MySQLArtifactStore(self.connection)
+        self.page_version_store = MySQLPageVersionStore(self.connection)
         self.baseline_store = MySQLBaselineStore(self.connection)
         self.detection_store = MySQLDetectionVerdictStore(self.connection)
         
         # Initialize Engines (Analytical and Execution logic)
         self.frontier = Frontier(self.task_store) # Uses defaults for retries/heartbeat
         self.worker = CrawlWorker(self.artifact_store)
+        self.normalizer = NormalizationEngine()
         self.extractor = BaselineExtractor(extraction_version="v1")
         self.detector = DefacementDetector(extraction_version="v1")
         
@@ -150,11 +156,26 @@ class CrawlSessionManager:
             
             # Phase 3: Crawl Execution
             # Worker consumes REQUEST_TIMEOUT, USER_AGENT, VERIFY_SSL_CERTIFICATE from config
+            # Phase 1: Crawl & Fetch (Memory Only)
             crawl_task = self.frontier.prepare_crawl_task(task)
-            artifact, extracted_urls = self.worker.execute(crawl_task)
+            response, extracted_urls = self.worker.execute(crawl_task)
             
-            # Artifact Retrieval
-            if artifact and artifact.http_status > 0:
+            # Phase 2: Normalization (The Gatekeeper)
+            # Converts raw response -> clean PageVersion
+            page_version = self.normalizer.normalize(response)
+            page_version_id = None
+            
+            if page_version:
+                # Save Normalized Content (Idempotent)
+                self.page_version_store.save(page_version)
+                page_version_id = page_version.page_version_id
+
+            # Phase 3: Hash & History Log (Refactored)
+            # Log the event, linking to the content if it exists.
+            self.artifact_store.write(response, page_version_id)
+            
+            # Artifact Retrieval Check
+            if response and response.http_status > 0:
                 self.frontier.report_success(task.normalized_url)
                 
                 # INVARIANT:

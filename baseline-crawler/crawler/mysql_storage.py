@@ -13,7 +13,7 @@ class MySQLArtifactStore(ArtifactWriter):
     def __init__(self, connection_pool):
         self._pool = connection_pool
 
-    def write(self, response: CrawlResponse) -> None:
+    def write(self, response: CrawlResponse, page_version_id: Optional[str] = None) -> None:
         """
         Log the crawl event. 
         Raw Body is NOT written.
@@ -27,8 +27,8 @@ class MySQLArtifactStore(ArtifactWriter):
             INSERT INTO crawl_history (
                 event_id, session_id, normalized_url, attempt_number,
                 http_status, content_type, response_headers, 
-                created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                page_version_id, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE event_id=event_id
         """
         # Ensure headers are JSON serializable
@@ -38,6 +38,7 @@ class MySQLArtifactStore(ArtifactWriter):
             cursor.execute(sql, (
                 event_id, response.session_id, response.normalized_url,
                 response.attempt_number, response.http_status,
-                response.content_type, headers_json, response.request_timestamp
+                response.content_type, headers_json, 
+                page_version_id, response.request_timestamp
             ))
             self._pool.commit()

@@ -127,7 +127,8 @@ class CrawlWorker:
             )
 
         # INVARIANT: Every attempt results in exactly one history log.
-        self._writer.write(crawl_response)
+        # UPDATE: Logging is now orchestrated by main.py to separate Phase 1 from Phase 3.
+        # self._writer.write(crawl_response)
         
         # Extract links from successful HTML responses
         extracted_urls = []

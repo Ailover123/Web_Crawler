@@ -7,9 +7,10 @@ class ArtifactWriter(ABC):
     Phase 1 Output: Metadata logging ONLY.
     """
     @abstractmethod
-    def write(self, response: CrawlResponse) -> None:
+    def write(self, response: CrawlResponse, page_version_id: Optional[str] = None) -> None:
         """
         Atomically write crawl metadata to history.
         Raw body is explicitly ignored.
+        Links to Normalized Content (PageVersion) if available.
         """
         pass
