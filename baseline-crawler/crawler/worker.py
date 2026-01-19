@@ -1,108 +1,195 @@
-"""
-Worker thread for the crawler.
-Each worker fetches a URL, parses it, enqueues new URLs, and marks as visited.
-"""
-
+# crawler/worker.py
 import threading
-from crawler.fetcher import fetch
-from crawler.parser import extract_urls
-from crawler.normalizer import normalize_url
-from crawler.storage.db import get_connection
 import time
-import json
+import re
+from collections import defaultdict
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 
-class Worker(threading.Thread):
-    """
-    Crawler worker thread.
-    Runs in a loop: dequeue URL, fetch, parse, enqueue new URLs, mark visited.
-    Exits when no more URLs and queue empty.
-    """
+from crawler.fetcher import fetch
+from crawler.parser import extract_urls
+from crawler.normalizer import (
+    normalize_rendered_html,
+    normalize_url,
+)
+from crawler.storage.db import insert_crawl_page
+from crawler.storage.baseline_store import (
+    store_snapshot_file,
+    store_baseline_hash,
+)
+from crawler.compare_engine import CompareEngine
 
-    def __init__(self, frontier, name="Worker"):
+from crawler.js_detect import needs_js_rendering
+from crawler.js_renderer import render_js_sync
+from crawler.render_cache import get_cached_render, set_cached_render
+
+
+# ==================================================
+# BLOCK RULES
+# ==================================================
+
+PATH_BLOCK_RULES = {
+    "TAG_PAGE": r"^/tag/",
+    "AUTHOR_PAGE": r"^/author/",
+    "PAGINATION": r"/page/\d*/?$",
+}
+
+STATIC_EXTENSIONS = (
+    ".css", ".js", ".png", ".jpg", ".jpeg",
+    ".gif", ".svg", ".ico", ".pdf", ".zip"
+)
+
+BLOCK_REPORT = defaultdict(list)
+BLOCK_LOCK = threading.Lock()
+
+
+def classify_block(url: str):
+    parsed = urlparse(url)
+    if parsed.path.endswith(STATIC_EXTENSIONS):
+        return "STATIC"
+    for k, r in PATH_BLOCK_RULES.items():
+        if re.search(r, parsed.path.lower()):
+            return k
+    return None
+
+
+# ==================================================
+# STRICT DOMAIN FILTER
+# ==================================================
+
+def _allowed_domain(seed_url: str, candidate_url: str) -> bool:
+    seed_netloc = urlparse(seed_url).netloc.lower().split(":")[0]
+    cand_netloc = urlparse(candidate_url).netloc.lower().split(":")[0]
+
+    base = seed_netloc[4:] if seed_netloc.startswith("www.") else seed_netloc
+    return cand_netloc == base or cand_netloc == f"www.{base}"
+
+
+# ==================================================
+# WORKER
+# ==================================================
+
+class Worker(threading.Thread):
+    def __init__(
+        self,
+        frontier,
+        name,
+        custid,
+        siteid_map,
+        job_id,
+        crawl_mode,
+        seed_url,
+    ):
         super().__init__(name=name)
         self.frontier = frontier
         self.running = True
+        self.custid = custid
+        self.siteid = next(iter(siteid_map.values()))
+        self.job_id = job_id
+        self.crawl_mode = crawl_mode
+        self.seed_url = seed_url
+
+        self.compare_engine = (
+            CompareEngine(custid=self.custid)
+            if crawl_mode == "COMPARE"
+            else None
+        )
 
     def run(self):
-        """
-        Main worker loop.
-        """
-        print(f"[WORKER-{self.name}] started")
+        print(f"[{self.name}] started ({self.crawl_mode})")
+
         while self.running:
-            item = self.frontier.dequeue()
-            if item is None:
-                # No item currently available; sleep briefly and retry
+            (item, got_task) = self.frontier.dequeue()
+
+            if not got_task:
                 time.sleep(0.1)
                 continue
 
-            url, discovered_from, depth = item
-
-            print(f"[WORKER-{self.name}] dequeued:", url)
+            url, parent, depth = item
+            start = time.time()
 
             try:
-                print(f"[FETCH] {url}")
-                # Fetch
-                fetch_result = fetch(url, discovered_from, depth)
-                domain = urlparse(url).netloc
-                timestamp = datetime.now(timezone.utc).isoformat()
-                if fetch_result['success']:
-                    response = fetch_result['response']
-                    # Parse and enqueue new URLs and record assets
-                    html = response.text
-                    new_urls, assets = extract_urls(html, url)
-                    for new_url in new_urls:
-                        ok = self.frontier.enqueue(new_url, url, depth + 1)
-                        if not ok:
-                            print(f"[WORKER-{self.name}] enqueue rejected: {new_url}")
-                        else:
-                            print(f"[WORKER-{self.name}] enqueued: {new_url}")
-                    # Record assets in routing graph
-                    normalized_parent = normalize_url(url)
-                    if normalized_parent not in self.frontier.routing_graph:
-                        self.frontier.routing_graph[normalized_parent] = []
-                    for asset in assets:
-                        normalized_asset = normalize_url(asset)
-                        if normalized_asset not in self.frontier.routing_graph[normalized_parent]:
-                            self.frontier.routing_graph[normalized_parent].append(normalized_asset)
+                print(f"[{self.name}] Crawling {url}")
 
-                    # Record to domain-specific DB
-                    conn = get_connection(domain)
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (domain, url, discovered_from, json.dumps(new_urls), response.status_code, 0.0, len(response.content), timestamp))
-                    conn.commit()
-                    conn.close()
-                else:
-                    # Record failed fetch
-                    conn = get_connection(domain)
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO crawl_data (domain, url, routed_from, urls_present_on_page, fetch_status, speed, size, timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (domain, url, discovered_from, json.dumps([]), 0, 0.0, 0, timestamp))
-                    conn.commit()
-                    conn.close()
-                    print(f"[WORKER-{self.name}] fetch failed for {url}: {fetch_result['error']}")
-            except Exception as e:
-                # Log the exception to prevent silent failures that cause crawler to hang
-                print(f"[WORKER-{self.name}] Error processing {url}: {e}")
-                import traceback
-                traceback.print_exc()
+                result = fetch(url, parent, depth)
+                fetched_at = datetime.now(timezone.utc)
 
-            # Always mark as visited to prevent hanging, even on error
-            try:
-                self.frontier.mark_visited(url)
+                if not result["success"]:
+                    continue
+
+                resp = result["response"]
+                ct = resp.headers.get("Content-Type", "")
+
+                insert_crawl_page({
+                    "job_id": self.job_id,
+                    "custid": self.custid,
+                    "siteid": self.siteid,
+                    "url": url,
+                    "parent_url": parent,
+                    "depth": depth,
+                    "status_code": resp.status_code,
+                    "content_type": ct,
+                    "content_length": len(resp.content),
+                    "response_time_ms": int((time.time() - start) * 1000),
+                    "fetched_at": fetched_at,
+                })
+
+                if "text/html" not in ct.lower():
+                    continue
+
+                html = resp.text
+
+                if needs_js_rendering(html):
+                    cached = get_cached_render(url)
+                    if cached:
+                        html = cached
+                    else:
+                        html = normalize_rendered_html(render_js_sync(url))
+                        set_cached_render(url, html)
+
+                urls, _ = extract_urls(html, url)
+
+                if self.crawl_mode == "BASELINE":
+                    baseline_id, _, path = store_snapshot_file(
+                        custid=self.custid,
+                        siteid=self.siteid,
+                        url=url,
+                        html=html,
+                        crawl_mode="BASELINE",
+                    )
+
+                    store_baseline_hash(
+                        site_id=self.siteid,
+                        normalized_url=normalize_url(url),
+                        raw_html=html,
+                        baseline_path=path,
+                    )
+
+                elif self.crawl_mode == "COMPARE":
+                    self.compare_engine.handle_page(
+                        siteid=self.siteid,
+                        url=url,
+                        html=html,
+                    )
+
+                for u in urls:
+                    if classify_block(u):
+                        with BLOCK_LOCK:
+                            BLOCK_REPORT["BLOCK_RULE"].append(u)
+                        continue
+
+                    if not _allowed_domain(self.seed_url, u):
+                        with BLOCK_LOCK:
+                            BLOCK_REPORT["DOMAIN_FILTER"].append(u)
+                        continue
+
+                    self.frontier.enqueue(u, url, depth + 1)
+
             except Exception as e:
-                print(f"[WORKER-{self.name}] mark_visited failed for {url}: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"[{self.name}] ERROR {url}: {e}")
+
+            finally:
+                self.frontier.mark_visited(url, got_task=got_task)
 
     def stop(self):
-        """
-        Stop the worker.
-        """
         self.running = False
