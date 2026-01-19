@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Baseline Snapshots</h2>
+
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>URL</th>
+                <th>Site ID</th>
+                <th>Hash (Short)</th>
+                <th>Snapshot Path</th>
+                <th>Created</th>
+                <th>Updated</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for baseline in baselines %}
+            <tr>
+                <td><a href="{{ baseline.url }}" target="_blank">{{ baseline.url[:50] }}...</a></td>
+                <td>{{ baseline.siteid }}</td>
+                <td><code>{{ baseline.html_hash_short }}</code></td>
+                <td>{{ baseline.snapshot_path or 'N/A' }}</td>
+                <td>{{ baseline.baseline_created_at_ist or baseline.baseline_created_at }}</td>
+                <td>{{ baseline.baseline_updated_at_ist or baseline.baseline_updated_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if not baselines %}
+<p style="text-align: center; padding: 40px;">No baselines found.</p>
+{% endif %}
+
+{% endblock %}

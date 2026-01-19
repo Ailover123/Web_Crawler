@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Dashboard</h2>
+
+<div class="stats-grid">
+    <div class="stat-card success">
+        <h3>Total Crawl Jobs</h3>
+        <div class="value">{{ stats.total_jobs }}</div>
+    </div>
+    
+    <div class="stat-card success">
+        <h3>Completed Jobs</h3>
+        <div class="value">{{ stats.completed_jobs }}</div>
+    </div>
+    
+    <div class="stat-card high">
+        <h3>Failed Jobs</h3>
+        <div class="value">{{ stats.failed_jobs }}</div>
+    </div>
+    
+    <div class="stat-card success">
+        <h3>Pages Crawled</h3>
+        <div class="value">{{ stats.total_pages_crawled }}</div>
+    </div>
+    
+    <div class="stat-card">
+        <h3>Total Baselines</h3>
+        <div class="value">{{ stats.total_baselines }}</div>
+    </div>
+    
+    <div class="stat-card high">
+        <h3>Open Alerts</h3>
+        <div class="value">{{ stats.open_alerts }}</div>
+    </div>
+    
+    <div class="stat-card high">
+        <h3>High Severity</h3>
+        <div class="value">{{ stats.high_severity }}</div>
+    </div>
+    
+    <div class="stat-card medium">
+        <h3>Medium Severity</h3>
+        <div class="value">{{ stats.medium_severity }}</div>
+    </div>
+</div>
+
+<h3 style="margin-top: 30px; margin-bottom: 15px;">Recent Crawl Jobs</h3>
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Job ID</th>
+                <th>Site</th>
+                <th>Start URL</th>
+                <th>Status</th>
+                <th>Pages</th>
+                <th>Started</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for job in stats.recent_jobs %}
+            <tr>
+                <td><code>{{ job.job_id[:8] }}...</code></td>
+                <td>{{ job.siteid }}</td>
+                <td>{{ job.start_url }}</td>
+                <td>
+                    {% if job.status == 'completed' %}
+                    <span class="badge badge-success">✓ Completed</span>
+                    {% elif job.status == 'failed' %}
+                    <span class="badge badge-danger">✗ Failed</span>
+                    {% else %}
+                    <span class="badge badge-info">Running</span>
+                    {% endif %}
+                </td>
+                <td>{{ job.pages_crawled }}</td>
+                <td>{{ job.started_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% endblock %}

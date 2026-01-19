@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Defacement Detection Detail</h2>
+
+<div style="background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+    <h3>Detection Information</h3>
+    <table style="width: 100%; border-collapse: collapse;">
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1; font-weight: bold;">URL</td>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1;"><a href="{{ detection.url }}" target="_blank">{{ detection.url }}</a></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1; font-weight: bold;">Site ID</td>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1;">{{ detection.siteid }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1; font-weight: bold;">Severity</td>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1;">
+                {% if detection.severity == 'HIGH' %}
+                <span class="badge badge-danger">🔴 HIGH</span>
+                {% elif detection.severity == 'MEDIUM' %}
+                <span class="badge badge-warning">🟠 MEDIUM</span>
+                {% elif detection.severity == 'LOW' %}
+                <span class="badge badge-info">🔵 LOW</span>
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1; font-weight: bold;">Status</td>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1;">
+                {% if detection.status == 'open' %}
+                <span class="badge badge-danger">OPEN</span>
+                {% elif detection.status == 'closed' %}
+                <span class="badge badge-success">CLOSED</span>
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1; font-weight: bold;">Detected At</td>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1;">{{ detection.detected_at_ist or detection.detected_at }}</td>
+        </tr>
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1; font-weight: bold;">Baseline Hash</td>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1;"><code>{{ detection.baseline_hash }}</code></td>
+        </tr>
+        <tr>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1; font-weight: bold;">Observed Hash</td>
+            <td style="padding: 10px; border-bottom: 1px solid #ecf0f1;"><code>{{ detection.observed_hash }}</code></td>
+        </tr>
+    </table>
+</div>
+
+{% if detection.diff_summary_json %}
+<div style="background: white; padding: 20px; border-radius: 8px;">
+    <h3>Diff Summary</h3>
+    <pre style="background: #f5f5f5; padding: 15px; border-radius: 4px; overflow-x: auto;">{{ detection.diff_summary_json | tojson(indent=2) }}</pre>
+</div>
+{% endif %}
+
+<div style="margin-top: 20px;">
+    <a href="/detections" style="display: inline-block; padding: 10px 20px; background-color: #3498db; color: white; text-decoration: none; border-radius: 4px;">← Back to Detections</a>
+</div>
+
+{% endblock %}

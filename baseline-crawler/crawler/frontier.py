@@ -54,12 +54,11 @@ class Frontier:
     """
 
     def __init__(self):
-        self.queue = Queue(maxsize=10_000)  # Thread-safe queue for (url, discovered_from, depth)
+        self.queue = Queue(maxsize=10_000)  # Thread-safe queue for (url, parent_url) tuples
         self.visited = set()  # URLs that have been crawled
         self.in_progress = set()  # URLs currently being fetched
         self.discovered = set()  # All URLs discovered
         self.classifications = {}  # URL classifications
-        self.routing_graph = {}  # parent -> list of children
         self.lock = Lock()  # Single lock for atomic operations
 
     def enqueue(self, url, discovered_from=None, depth=0):
@@ -83,7 +82,7 @@ class Frontier:
             # reserve immediately
             self.in_progress.add(normalized_url)
             try:
-                self.queue.put((url, discovered_from, depth))
+                self.queue.put((url, discovered_from))
             except Exception as e:
                 logger.exception(f"enqueue: queue.put failed for {url}: {e}")
                 # rollback reservation
@@ -95,24 +94,12 @@ class Frontier:
                 self.classifications[normalized_url] = classify_url(url)
             except Exception:
                 logger.debug(f"enqueue: classify_url failed for {url}")
-            # Record routing: discovered_from -> normalized_url
-            if discovered_from:
-                try:
-                    normalized_parent = normalize_url(discovered_from)
-                    if normalized_parent not in self.routing_graph:
-                        self.routing_graph[normalized_parent] = []
-                    if normalized_url not in self.routing_graph[normalized_parent]:
-                        self.routing_graph[normalized_parent].append(normalized_url)
-                except Exception:
-                    logger.debug(f"enqueue: failed to record routing for parent {discovered_from} -> {url}")
-            # Record assets if any
-            # Note: Assets are not enqueued, just recorded
-            logger.info(f"enqueue: successfully queued {normalized_url} (depth={depth}, discovered_from={discovered_from}) qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
+            logger.info(f"enqueue: successfully queued {normalized_url} (discovered_from={discovered_from}) qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
             return True
 
     def dequeue(self):
         """
-        Dequeue a URL tuple (url, discovered_from, depth).
+        Dequeue a URL tuple (url, parent_url).
         Returns the tuple or None if queue empty.
         """
         try:

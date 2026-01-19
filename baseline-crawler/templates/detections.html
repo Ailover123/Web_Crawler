@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Defacement Detection Results</h2>
+
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>URL</th>
+                <th>Site ID</th>
+                <th>Severity</th>
+                <th>Status</th>
+                <th>Baseline Hash</th>
+                <th>Observed Hash</th>
+                <th>Detected At</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for detection in detections %}
+            <tr>
+                <td><a href="{{ detection.url }}" target="_blank">{{ detection.url[:40] }}...</a></td>
+                <td>{{ detection.siteid }}</td>
+                <td>
+                    {% if detection.severity == 'HIGH' %}
+                    <span class="badge badge-danger">🔴 HIGH</span>
+                    {% elif detection.severity == 'MEDIUM' %}
+                    <span class="badge badge-warning">🟠 MEDIUM</span>
+                    {% elif detection.severity == 'LOW' %}
+                    <span class="badge badge-info">🔵 LOW</span>
+                    {% else %}
+                    <span class="badge">NONE</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if detection.status == 'open' %}
+                    <span class="badge badge-danger">OPEN</span>
+                    {% elif detection.status == 'closed' %}
+                    <span class="badge badge-success">CLOSED</span>
+                    {% else %}
+                    <span class="badge badge-info">{{ detection.status }}</span>
+                    {% endif %}
+                </td>
+                <td><code>{{ detection.baseline_hash[:8] }}...</code></td>
+                <td><code>{{ detection.observed_hash[:8] }}...</code></td>
+                <td>{{ detection.detected_at_ist or detection.detected_at }}</td>
+                <td>
+                    <a href="/detection/{{ detection.id }}" style="color: #3498db; text-decoration: none;">View →</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if not detections %}
+<p style="text-align: center; padding: 40px;">No open defacement detections found.</p>
+{% endif %}
+
+{% endblock %}

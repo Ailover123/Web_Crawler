@@ -8,17 +8,17 @@
 - Environment variables (`CRAWL_MODE` from `.env`)
 - MySQL database connection parameters
 - Customer & Site records from `sites` table
-- Raw seed URL from database
+  - Each site has: `siteid`, `custid`, `url`, `enabled` flag
+  - The `url` column is the actual seed URL (no separate raw URL needed)
 
 ### **STEPS:**
 1. **Environment Setup** - Load `.env`, validate `CRAWL_MODE` ∈ {BASELINE, CRAWL, COMPARE}
-2. **Database Health Check** - `check_db_health()` validates MySQL connectivity ([main.py#L87-L90](baseline-crawler/main.py#L87-L90))
-3. **Site Discovery** - `fetch_enabled_sites()` queries all enabled sites from DB ([main.py#L92-L96](baseline-crawler/main.py#L92-L96))
-4. **Seed URL Resolution** - `resolve_seed_url()` tests with/without trailing slash, follows redirects, locks canonical URL ([main.py#L41-L68](baseline-crawler/main.py#L41-L68))
-5. **URL Normalization** - `normalize_url()` removes trailing slashes (except root), preserves query/fragments ([normalizer.py#L24-L35](baseline-crawler/crawler/normalizer.py#L24-L35))
-6. **Job Registration** - Generate UUID, call `insert_crawl_job()` to create MySQL record with status='running' ([main.py#L111-L117](baseline-crawler/main.py#L111-L117))
-7. **Frontier Initialization** - Create thread-safe queue, visited/in-progress sets, routing graph ([frontier.py#L70-L77](baseline-crawler/crawler/frontier.py#L70-L77))
-8. **Worker Spawn** - Launch 5 initial worker threads with frontier reference, custid, siteid_map, job_id, crawl_mode, seed_url ([main.py#L125-L138](baseline-crawler/main.py#L125-L138))
+2. **Database Health Check** - `check_db_health()` validates MySQL connectivity
+3. **Site Discovery** - `fetch_enabled_sites()` queries all enabled sites (url is already the seed)
+4. **URL Normalization** - `normalize_url()` removes trailing slashes (except root), preserves query/fragments
+5. **Job Registration** - Generate UUID, call `insert_crawl_job()` to create MySQL record with status='running'
+6. **Frontier Initialization** - Create thread-safe queue, visited/in-progress sets
+7. **Worker Spawn** - Launch worker threads with frontier reference, custid, siteid, job_id, crawl_mode, domain_list
 
 ### **ROLE OF WORKER:**
 None - Workers are idle during initialization; main thread handles all setup.
@@ -44,7 +44,7 @@ None - Workers are idle during initialization; main thread handles all setup.
   Started 5 workers.
   ```
 - **Database Record:** New row in `crawl_jobs` table (job_id, custid, siteid, status='running', started_at)
-- **Memory State:** Frontier queue seeded with (start_url, None, depth=0)
+- **Memory State:** Frontier queue seeded with start_url from sites table
 
 ### **FILES & FUNCTIONS:**
 - [main.py](baseline-crawler/main.py) - `main()`, `resolve_seed_url()`
@@ -58,18 +58,18 @@ None - Workers are idle during initialization; main thread handles all setup.
 ## **PHASE 2: CRAWL & FETCH**
 
 ### **INPUT:**
-- URL tuple from frontier queue: `(url, parent_url, depth)`
-- Seed URL for domain validation
+- URL from frontier queue: `(url, parent_url)`
+- Domain whitelist from `sites` table (normalized domains only)
 - Configuration: `REQUEST_TIMEOUT=10s`, `USER_AGENT`
 
 ### **STEPS:**
-1. **Queue Dequeue** - Worker calls `frontier.dequeue()`, blocks if empty ([worker.py#L113-L117](baseline-crawler/crawler/worker.py#L113-L117))
-2. **Domain Validation** - `_allowed_domain()` ensures URL matches seed domain (handles www/non-www) ([worker.py#L67-L72](baseline-crawler/crawler/worker.py#L67-L72))
-3. **Block Rule Check** - `classify_block()` rejects tag/author/pagination pages, static assets ([worker.py#L44-L51](baseline-crawler/crawler/worker.py#L44-L51))
-4. **HTTP Request** - `fetch()` issues `requests.get()` with timeout, User-Agent, SSL verification ([fetcher.py#L17-L28](baseline-crawler/crawler/fetcher.py#L17-L28))
-5. **Response Classification** - Check status code (2xx=success), Content-Type (HTML/JSON only) ([fetcher.py#L29-L43](baseline-crawler/crawler/fetcher.py#L29-L43))
-6. **Error Handling** - Catch timeout, connection errors, request exceptions ([fetcher.py#L45-L59](baseline-crawler/crawler/fetcher.py#L45-L59))
-7. **Database Recording** - `insert_crawl_page()` writes job_id, custid, siteid, url, parent, depth, status_code, content_type, size, response_time_ms, fetched_at ([worker.py#L127-L140](baseline-crawler/crawler/worker.py#L127-L140))
+1. **Queue Dequeue** - Worker calls `frontier.dequeue()`, blocks if empty
+2. **Domain Validation** - `_is_allowed_domain()` checks against domain list from `sites` table (exact domain matching, no www variants)
+3. **Block Rule Check** - `classify_block()` rejects tag/author/pagination pages, static assets
+4. **HTTP Request** - `fetch()` issues `requests.get()` with timeout, User-Agent, SSL verification
+5. **Response Classification** - Check status code (2xx=success), Content-Type (HTML/JSON only)
+6. **Error Handling** - Catch timeout, connection errors, request exceptions
+7. **Database Recording** - `insert_crawl_page()` writes job_id, custid, siteid, url, parent, status_code, content_type, size, response_time_ms, fetched_at
 
 ### **ROLE OF WORKER:**
 **Primary executor** - Each worker thread independently:
@@ -78,6 +78,38 @@ None - Workers are idle during initialization; main thread handles all setup.
 - Records metadata to database
 - Passes HTML to next phase
 - Marks URL as visited in frontier
+
+### **Worker Synchronization (Duplicate URL Prevention):**
+
+**Case 1: Sequential Same URL Fetch**
+```
+Time 1: Worker-0 dequeues https://example.com/page
+Time 2: Worker-0 marks URL in visited set (atomic operation with lock)
+Time 3: Worker-1 calls enqueue(https://example.com/page)
+        → frontier.enqueue() checks visited set (locked)
+        → URL already in visited, returns False
+        → URL NOT enqueued, prevents duplicate fetch
+```
+
+**Case 2: Concurrent Same URL Fetch**
+```
+Time 1: Worker-0 dequeues https://example.com/page
+        → Moves URL from queue to in_progress set (atomic with lock)
+Time 1: Worker-1 calls enqueue(https://example.com/page)
+        → frontier.enqueue() checks in_progress set (locked)
+        → URL already in_progress, returns False
+        → URL NOT enqueued, prevents concurrent fetch
+        
+Time 2: Worker-0 completes fetch, calls mark_visited()
+        → Moves URL from in_progress to visited set
+        → Thread-safe lock ensures no race condition
+```
+
+**Synchronization Mechanism:**
+- **Lock**: `Frontier.lock` protects all state changes
+- **Visited Set**: Tracks permanently crawled URLs
+- **In-Progress Set**: Tracks URLs currently being fetched
+- **Dequeue Atomicity**: When URL dequeued, immediately moved to in_progress under lock
 
 ### **TIME TAKEN:**
 **~200ms - 3s per URL**
@@ -99,7 +131,7 @@ None - Workers are idle during initialization; main thread handles all setup.
 - **Block Report:** URLs rejected by domain/block rules added to `BLOCK_REPORT` dict
 
 ### **FILES & FUNCTIONS:**
-- [crawler/worker.py](baseline-crawler/crawler/worker.py) - `Worker.run()`, `_allowed_domain()`, `classify_block()`
+- [crawler/worker.py](baseline-crawler/crawler/worker.py) - `Worker.run()`, `_is_allowed_domain()`, `classify_block()`
 - [crawler/fetcher.py](baseline-crawler/crawler/fetcher.py) - `fetch()`
 - [crawler/frontier.py](baseline-crawler/crawler/frontier.py) - `dequeue()`, `mark_visited()`
 - [crawler/storage/db.py](baseline-crawler/crawler/storage/db.py) - `insert_crawl_page()`
@@ -114,13 +146,42 @@ None - Workers are idle during initialization; main thread handles all setup.
 - Content-Type header
 
 ### **STEPS:**
-1. **JS Detection** - `needs_js_rendering()` scans for React/Vue/Angular/SPA patterns ([js_detect.py](baseline-crawler/crawler/js_detect.py))
-2. **JS Rendering (if needed)** - `render_js_sync()` launches headless Chrome, waits for DOM load ([js_renderer.py](baseline-crawler/crawler/js_renderer.py))
-3. **Render Caching** - `get_cached_render()` checks Redis/memory cache to avoid re-rendering ([render_cache.py](baseline-crawler/crawler/render_cache.py))
-4. **HTML Cleanup** - `normalize_rendered_html()` strips trivial comments (LiteSpeed Cache timestamps) ([normalizer.py#L38-L60](baseline-crawler/crawler/normalizer.py#L38-L60))
-5. **Semantic Normalization** - `semantic_normalize_html()` collapses whitespace, normalizes punctuation, sorts comma-separated lists ([normalizer.py#L63-L103](baseline-crawler/crawler/normalizer.py#L63-L103))
-6. **Link Extraction** - `extract_urls()` parses `<a>`, `<img>`, `<link>`, `<script>` tags, resolves to absolute URLs, filters to same domain ([parser.py#L34-L72](baseline-crawler/crawler/parser.py#L34-L72))
-7. **URL Classification** - `classify_url()` tags each URL as pagination/assets/scripts/API/normal_html ([parser.py#L10-L32](baseline-crawler/crawler/parser.py#L10-L32))
+1. **JS Detection** - `needs_js_rendering()` scans for React/Vue/Angular/SPA patterns
+2. **JS Rendering (if needed)** - `render_js_sync()` launches headless Chrome, waits for DOM load
+3. **Render Caching** - `get_cached_render()` checks Redis/memory cache to avoid re-rendering
+4. **HTML Cleanup** - `normalize_rendered_html()` strips trivial comments (LiteSpeed Cache timestamps)
+5. **Semantic Normalization** - `semantic_normalize_html()` collapses whitespace, normalizes punctuation, sorts comma-separated lists
+6. **Link Extraction** - `extract_urls()` parses `<a>`, `<img>`, `<link>`, `<script>` tags, resolves to absolute URLs, filters to same domain
+7. **URL Classification** - `classify_url()` tags each URL as pagination/assets/scripts/API/normal_html
+
+### **Why URL Classification if Block Rules Exist?**
+
+**Block Rules** (`classify_block()`) → **BINARY DECISION (Block/Allow)**
+- These rules are binary: STATIC, TAG_PAGE, AUTHOR_PAGE, PAGINATION → **DO NOT ENQUEUE**
+- Applied at the frontier level (Phase 2)
+- Purpose: Prevent specific patterns from being added to the crawl queue
+
+**URL Classification** (`classify_url()`) → **METADATA TAGGING (For Analysis)**
+- Tags URLs with multiple categories: `pagination`, `assets_uploads`, `scripts_styles`, `api_like`, `normal_html`
+- Applied during normalization phase (Phase 3) for **informational purposes only**
+- Purpose: Provide insights into crawled URL types for:
+  - Analytics/reporting
+  - Baseline comparison (identify if only pagination changed)
+  - Defacement pattern detection (e.g., script injection in normal_html vs api_like)
+  - Forensic analysis of which URL types were targeted
+
+**Example:**
+```
+URL: https://example.com/uploads/image.jpg
+classify_block() → "STATIC" → NOT enqueued (blocked in Phase 2)
+
+URL: https://example.com/about
+classify_url() → "normal_html" → Enqueued, classified for analytics (Phase 3)
+
+URL: https://example.com/?page=2
+classify_url() → "pagination" → Enqueued, tagged as pagination page
+                              (can be excluded from baseline if only pagination URL changed)
+```
 
 ### **ROLE OF WORKER:**
 **Data transformer** - Worker thread:
@@ -327,19 +388,17 @@ None - Workers are idle during initialization; main thread handles all setup.
 ## **PHASE 7: UI**
 
 ### **INPUT:**
-- SQLite database: `data/crawler.db` (urls, baselines, diff_evidence tables)
-- JSON files: `combined_domain_analysis.json`, `routing_graph.json`
-- Snapshot files: `data/snapshots/baselines/`, `data/snapshots/observed/`
+- MySQL database: `crawlerdb` (crawl_jobs, crawl_pages, baselines, diff_evidence tables)
+- Snapshot files: `baselines/`, `observed/` directories
 
 ### **STEPS:**
-1. **Flask App Launch** - Start web server on `http://localhost:5000` ([ui/app.py#L235-L236](baseline-crawler/ui/app.py#L235-L236))
-2. **Dashboard Rendering** - `index()` route queries summary stats (total URLs, baselines, open alerts) ([ui/app.py#L22-L27](baseline-crawler/ui/app.py#L22-L27))
-3. **URL Listing** - `/urls` route fetches all rows from `urls` table ([ui/app.py#L29-L36](baseline-crawler/ui/app.py#L29-L36))
-4. **Baseline Listing** - `/baselines` route shows all stored baselines with truncated hashes ([ui/app.py#L38-L45](baseline-crawler/ui/app.py#L38-L45))
-5. **Alert Listing** - `/alerts` route queries `diff_evidence WHERE status='open'` ([ui/app.py#L47-L66](baseline-crawler/ui/app.py#L47-L66))
-6. **Alert Detail View** - `/alert/<id>` loads full diff with side-by-side HTML rendering ([ui/app.py#L68-L113](baseline-crawler/ui/app.py#L68-L113))
-7. **Diff Highlighting** - `add_line_numbers_with_highlighting()` uses `difflib` to color-code changes ([ui/app.py#L158-L209](baseline-crawler/ui/app.py#L158-L209))
-8. **Observability Dashboard** - Separate Flask app in `observability_ui.py` serves read-only domain analysis from JSON
+1. **Flask App Launch** - Start web server on `http://localhost:5000`
+2. **Dashboard Route** - `/` displays summary stats (total jobs, completed jobs, failed jobs, pages crawled, baselines, open alerts)
+3. **Failed URLs Route** - `/failed-urls` shows all failed page fetches with status codes and timestamps
+4. **Baselines Route** - `/baselines` lists all stored baseline snapshots with URLs, hashes, creation dates
+5. **Detections Route** - `/detections` shows all open defacement alerts with severity levels
+6. **Detection Detail Route** - `/detection/<id>` loads full defacement information with diff_summary JSON
+7. **API Endpoints** - `/api/stats` provides JSON stats for programmatic access
 
 ### **ROLE OF WORKER:**
 **None** - UI is post-crawl analysis; workers have completed execution.
@@ -347,24 +406,16 @@ None - Workers are idle during initialization; main thread handles all setup.
 ### **TIME TAKEN:**
 **Real-time (user-initiated)**
 - Page load: 50-200ms (database queries + template rendering)
-- Alert detail: 100-500ms (loads snapshot files, generates diff)
-- Observability dashboard: 50-100ms (reads JSON files)
+- Detection detail: 100-300ms (loads JSON diff summary)
+- API endpoints: 30-100ms (cached queries)
 
 ### **OUTPUT:**
 - **Web Interface:**
-  - **Summary Dashboard:** Total crawled URLs, baseline count, open alerts (HIGH/MEDIUM/LOW), recent failures
-  - **URL Inventory:** Table of all discovered URLs with status, domain, depth, last crawled timestamp
-  - **Baseline Archive:** List of stored baselines with URL, hash (truncated), creation/update timestamps
-  - **Alert Management:** Open defacement alerts with severity badges, detected timestamp (IST), quick actions
-  - **Alert Detail Page:** 
-    - Side-by-side HTML diff with syntax highlighting
-    - Line numbers
-    - Red highlighting for removed lines
-    - Green highlighting for added lines
-    - Yellow highlighting for changed lines
-    - Metadata: baseline/observed hashes, diff_summary JSON, severity reason
-  - **Routing Graph:** Visual representation of URL→child URL relationships
-  - **Domain Analysis:** Per-domain statistics from `combined_domain_analysis.json`
+  - **Dashboard:** Summary cards showing crawl stats, recent jobs list
+  - **Failed URLs Page:** Table of failed fetches with status codes, response times
+  - **Baselines Page:** Table of stored baselines with truncated hashes, timestamps
+  - **Detections Page:** Table of open alerts with severity badges, quick detail links
+  - **Detection Detail:** Full defacement info with JSON diff summary
 
 - **Console Prints (on startup):**
   ```
@@ -373,11 +424,13 @@ None - Workers are idle during initialization; main thread handles all setup.
   ```
 
 ### **FILES & FUNCTIONS:**
-- [ui/app.py](baseline-crawler/ui/app.py) - Main Flask app with routes: `/`, `/urls`, `/baselines`, `/alerts`, `/alert/<id>`
-- [observability_ui.py](baseline-crawler/observability_ui.py) - Read-only observability dashboard
-- [ui/templates/](baseline-crawler/ui/templates/) - Jinja2 HTML templates
-- [ui/static/](baseline-crawler/ui/static/) - CSS/JS assets
-- Helper functions: `get_summary_stats()`, `get_baseline_html()`, `get_observed_html()`, `add_line_numbers_with_highlighting()`
+- [app.py](baseline-crawler/app.py) - Main Flask app with routes
+- [templates/base.html](baseline-crawler/templates/base.html) - Base template with navigation
+- [templates/dashboard.html](baseline-crawler/templates/dashboard.html) - Dashboard page
+- [templates/failed_urls.html](baseline-crawler/templates/failed_urls.html) - Failed URLs page
+- [templates/baselines.html](baseline-crawler/templates/baselines.html) - Baselines page
+- [templates/detections.html](baseline-crawler/templates/detections.html) - Detections listing
+- [templates/detection_detail.html](baseline-crawler/templates/detection_detail.html) - Detection detail page
 
 ---
 

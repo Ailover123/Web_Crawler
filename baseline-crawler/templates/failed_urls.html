@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Failed URLs</h2>
+
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>URL</th>
+                <th>Parent URL</th>
+                <th>Status Code</th>
+                <th>Content Type</th>
+                <th>Response Time (ms)</th>
+                <th>Fetched At</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for url in failed_urls %}
+            <tr>
+                <td><a href="{{ url.url }}" target="_blank">{{ url.url[:50] }}...</a></td>
+                <td>{{ url.parent_url or 'N/A' }}</td>
+                <td>
+                    {% if url.status_code %}
+                    <span class="badge badge-danger">{{ url.status_code }}</span>
+                    {% else %}
+                    <span class="badge badge-warning">N/A</span>
+                    {% endif %}
+                </td>
+                <td>{{ url.content_type or 'Unknown' }}</td>
+                <td>{{ url.response_time_ms or 'N/A' }}</td>
+                <td>{{ url.fetched_at_ist or url.fetched_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if not failed_urls %}
+<p style="text-align: center; padding: 40px;">No failed URLs found.</p>
+{% endif %}
+
+{% endblock %}
