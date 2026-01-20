@@ -1,21 +1,33 @@
-from pathlib import Path
+# crawler/baseline_reader.py
 
-BASELINE_ROOT = Path("baselines")
+from crawler.storage.mysql import get_connection
+from crawler.storage.db_guard import DB_SEMAPHORE
 
 
-def load_latest_baseline_html(custid: int, site_folder_id: str) -> str | None:
+def get_baseline_hash(*, site_id: int, normalized_url: str):
     """
-    Loads the most recent baseline HTML for a site.
-    Returns None if baseline does not exist.
+    Fetch baseline row for a given page.
+
+    Returns:
+        {
+            "id": <baseline_id>,
+            "content_hash": <sha256>
+        }
+        or None
     """
-    site_dir = BASELINE_ROOT / str(custid) / site_folder_id
-
-    if not site_dir.exists():
-        return None
-
-    html_files = sorted(site_dir.glob("*.html"))
-    if not html_files:
-        return None
-
-    # Last file = latest baseline snapshot
-    return html_files[-1].read_text(encoding="utf-8", errors="ignore")
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT id, content_hash
+            FROM baseline_pages
+            WHERE site_id=%s AND normalized_url=%s
+            """,
+            (site_id, normalized_url),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+        DB_SEMAPHORE.release()
