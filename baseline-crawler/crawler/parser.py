@@ -5,7 +5,7 @@
 # Notes: Extracts navigational URLs and assets, classifies URLs into types.
 
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 def classify_url(url):
     """
@@ -53,33 +53,42 @@ def extract_urls(html, base_url):
     urls = []
     assets = []
 
+    def strip_fragment(u: str) -> str:
+        p = urlparse(u)
+        # Drop the fragment to avoid "forceful hash" URLs like .../#section
+        return urlunparse((p.scheme, p.netloc, p.path, p.params, p.query, ""))
+
     # Extract from <a href>
     for a in soup.find_all('a', href=True):
-        url = urljoin(base_url, a['href'])
+        href = a['href']
+        # Skip pure fragment anchors (e.g., '#pricing')
+        if href.strip().startswith('#'):
+            continue
+        url = strip_fragment(urljoin(base_url, href))
         if _is_allowed_url(url, base_domain):
             urls.append(url)
 
     # Extract assets from <img src>
     for img in soup.find_all('img', src=True):
-        asset_url = urljoin(base_url, img['src'])
+        asset_url = strip_fragment(urljoin(base_url, img['src']))
         if _is_allowed_url(asset_url, base_domain):
             assets.append(asset_url)
 
     # Extract assets from <link rel="icon">
     for link in soup.find_all('link', rel='icon', href=True):
-        asset_url = urljoin(base_url, link['href'])
+        asset_url = strip_fragment(urljoin(base_url, link['href']))
         if _is_allowed_url(asset_url, base_domain):
             assets.append(asset_url)
 
     # Extract assets from <link rel="stylesheet">
     for link in soup.find_all('link', rel='stylesheet', href=True):
-        asset_url = urljoin(base_url, link['href'])
+        asset_url = strip_fragment(urljoin(base_url, link['href']))
         if _is_allowed_url(asset_url, base_domain):
             assets.append(asset_url)
 
     # Extract assets from <script src>
     for script in soup.find_all('script', src=True):
-        asset_url = urljoin(base_url, script['src'])
+        asset_url = strip_fragment(urljoin(base_url, script['src']))
         if _is_allowed_url(asset_url, base_domain):
             assets.append(asset_url)
 
@@ -87,11 +96,23 @@ def extract_urls(html, base_url):
 
 def _is_allowed_url(url, base_domain):
     """
-    Check if URL is allowed: same domain, http/https.
+    Allow only http/https and restrict to the same registrable host,
+    treating `www.` and non-`www` as equivalent. This prevents the
+    common case where the seed is `example.com` but links are
+    `www.example.com` (or vice versa) from being excluded.
     """
     parsed = urlparse(url)
-    if parsed.scheme not in ('http', 'https'):
+    if parsed.scheme not in ("http", "https"):
         return False
-    if parsed.netloc != base_domain:
-        return False
-    return True
+
+    # Normalize hosts by stripping ports and leading 'www.'
+    def _canon_host(host: str) -> str:
+        if not host:
+            return ""
+        h = host.lower().split(":")[0]
+        return h[4:] if h.startswith("www.") else h
+
+    cand = _canon_host(parsed.netloc)
+    base = _canon_host(base_domain)
+
+    return cand == base

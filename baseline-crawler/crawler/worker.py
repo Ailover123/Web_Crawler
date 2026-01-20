@@ -20,8 +20,10 @@ from crawler.storage.baseline_store import (
 from crawler.compare_engine import CompareEngine
 
 from crawler.js_detect import needs_js_rendering
-from crawler.js_renderer import render_js_sync
+
 from crawler.render_cache import get_cached_render, set_cached_render
+from crawler.js_render_worker import JSRenderWorker
+JS_RENDERER = JSRenderWorker()
 
 
 # ==================================================
@@ -39,7 +41,7 @@ STATIC_EXTENSIONS = (
     ".gif", ".svg", ".ico", ".pdf", ".zip"
 )
 
-BLOCK_REPORT = defaultdict(list)
+BLOCK_REPORT = defaultdict(int)
 BLOCK_LOCK = threading.Lock()
 
 
@@ -115,6 +117,13 @@ class Worker(threading.Thread):
                 fetched_at = datetime.now(timezone.utc)
 
                 if not result["success"]:
+                    err = result.get("error", "unknown")
+                    # Suppress noisy messages for ignored content types (e.g., images)
+                    if isinstance(err, str) and "ignored content type" in err:
+                        with BLOCK_LOCK:
+                            BLOCK_REPORT["FETCH_IGNORED_CONTENT_TYPE"] += 1
+                        continue
+                    print(f"[{self.name}] Fetch failed for {url}: {err}")
                     continue
 
                 resp = result["response"]
@@ -137,18 +146,34 @@ class Worker(threading.Thread):
                 if "text/html" not in ct.lower():
                     continue
 
+                # ---------------- HTML HANDLING ----------------
                 html = resp.text
 
-                if needs_js_rendering(html):
+                # 🔒 ALWAYS ensure final HTML before extracting URLs
+                urls, _ = extract_urls(html, url)
+
+                if not urls and needs_js_rendering(html):
+
                     cached = get_cached_render(url)
                     if cached:
                         html = cached
                     else:
-                        html = normalize_rendered_html(render_js_sync(url))
+                        print(f"[{self.name}] JS rendering {url}")
+                        html = JS_RENDERER.render(url)
                         set_cached_render(url, html)
 
+
+                # 🔒 Extract URLs ONLY after JS handling
                 urls, _ = extract_urls(html, url)
 
+                if not urls:
+                    print(f"[{self.name}] ⚠️  No URLs extracted from {url}")
+                    print(f"[{self.name}]    HTML size: {len(html)} bytes")
+                    print(f"[{self.name}]    Possible cause: JS-rendered content or minimal links")
+                else:
+                    print(f"[{self.name}] Extracted {len(urls)} URLs from {url}")
+
+                # ---------------- MODE LOGIC ----------------
                 if self.crawl_mode == "BASELINE":
                     baseline_id, _, path = store_snapshot_file(
                         custid=self.custid,
@@ -172,21 +197,42 @@ class Worker(threading.Thread):
                         html=html,
                     )
 
+                # ---------------- ENQUEUE ----------------
+                enqueued_count = 0
+                blocked_rule_count = 0
+                blocked_domain_count = 0
                 for u in urls:
                     if classify_block(u):
                         with BLOCK_LOCK:
-                            BLOCK_REPORT["BLOCK_RULE"].append(u)
+                            BLOCK_REPORT["BLOCK_RULE"] += 1
+                        blocked_rule_count += 1
                         continue
 
                     if not _allowed_domain(self.seed_url, u):
                         with BLOCK_LOCK:
-                            BLOCK_REPORT["DOMAIN_FILTER"].append(u)
+                            BLOCK_REPORT["DOMAIN_FILTER"] += 1
+                        blocked_domain_count += 1
                         continue
 
                     self.frontier.enqueue(u, url, depth + 1)
+                    enqueued_count += 1
+
+                if enqueued_count > 0:
+                    print(f"[{self.name}] Enqueued {enqueued_count} URLs")
+
+                # Print a concise summary of blocked URLs instead of every single one
+                if blocked_rule_count or blocked_domain_count:
+                    parts = []
+                    if blocked_rule_count:
+                        parts.append(f"{blocked_rule_count} blocked by rule")
+                    if blocked_domain_count:
+                        parts.append(f"{blocked_domain_count} blocked by domain")
+                    print(f"[{self.name}] Blocked: {'; '.join(parts)}")
 
             except Exception as e:
+                import traceback
                 print(f"[{self.name}] ERROR {url}: {e}")
+                print(f"[{self.name}] Traceback: {traceback.format_exc()}")
 
             finally:
                 self.frontier.mark_visited(url, got_task=got_task)

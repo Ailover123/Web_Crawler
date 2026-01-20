@@ -1,41 +1,11 @@
-"""
-DB access layer
-All DB access is routed through MySQL only
-"""
+from .mysql import *
 
-from .mysql import (
-    # existing writes
-    insert_crawl_page,
-    insert_baseline,
-    insert_diff,
-
-    # health + infra
-    check_db_health,
-    fetch_enabled_sites,
-
-    # crawl job lifecycle
-    insert_crawl_job,
-    complete_crawl_job,
-    fail_crawl_job,
-)
-
-# -------------------------------------------------
-# Explicit exports
-# -------------------------------------------------
 __all__ = [
-    # crawl data
     "insert_crawl_page",
-    "insert_baseline",
-    "insert_diff",
-
-    # site discovery
+    "insert_defacement_site",
     "fetch_enabled_sites",
-
-    # crawl job lifecycle
     "insert_crawl_job",
     "complete_crawl_job",
     "fail_crawl_job",
-
-    # infra
     "check_db_health",
 ]

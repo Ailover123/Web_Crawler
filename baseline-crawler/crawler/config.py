@@ -4,10 +4,6 @@ from pathlib import Path
 # This file defines crawl scope, limits, and seed URLs.
 # No depth logic, normalization, or defacement detection here.
 
-# Initial URLs to start crawling from (MANDATORY)
-SEED_URLS = [
-    "https://worldpeoplesolutions.com/"
-]
 
 # Maximum crawl depth
 # 0 = only seed URLs
@@ -24,7 +20,12 @@ ALLOWED_DOMAINS = []
 REQUEST_TIMEOUT = 10
 
 # User-Agent string for crawler identification
-USER_AGENT = "BaselineCrawler/1.0"
+# Use a modern browser UA to reduce bot challenges
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0 Safari/537.36"
+)
 
 # Canonical data directory for the crawler. Set to the `data` folder
 # located inside the `baseline-crawler` package.

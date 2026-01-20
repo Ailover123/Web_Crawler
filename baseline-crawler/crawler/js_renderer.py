@@ -44,29 +44,24 @@ def render_js_sync(url: str) -> str:
     Render a URL using Playwright and return rendered HTML.
     Blocks the calling thread briefly.
     """
-
     _ensure_browser()
 
     page = _context.new_page()
-
     try:
-        page.goto(
-            url,
-            wait_until="domcontentloaded",
-            timeout=8000,
-        )
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-        # Wait ONLY until meaningful content exists
+        # Wait for React/Vue/Angular hydration
         try:
             page.wait_for_function(
-                "() => document.body && document.body.innerText.length > 200",
-                timeout=3000,
+                "() => document.body && document.body.children.length > 0",
+                timeout=8000,
             )
         except Exception:
-            # Don't fail if condition not met
             pass
 
-        return page.content()
+        # Extra micro-wait for React commit phase
+        page.wait_for_timeout(1000)
 
+        return page.content()
     finally:
         page.close()

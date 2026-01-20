@@ -9,19 +9,28 @@ def needs_js_rendering(html: str) -> bool:
 
     h = html.lower()
 
-    # React / SPA shells
-    if '<div id="root"' in h:
+    # Explicit SPA roots
+    if (
+        '<div id="root"' in h or
+        '<div id="app"' in h or
+        '<app-root' in h or
+        '<div id="__next"' in h
+    ):
         return True
 
-    if '<div id="__next"' in h and len(h) < 4000:
-        return True
+    # Body exists but is empty / shell
+    if "<body" in h:
+        body_start = h.find("<body")
+        body = h[body_start:]
 
-    # No meaningful crawlable content
-    if h.count('<a ') == 0 and h.count('<p') == 0:
-        return True
-
-    # Heavy JS signals
-    if 'window.__initial_state__' in h:
-        return True
+        # No real content indicators
+        if (
+            "<a " not in body and
+            "<p" not in body and
+            "<main" not in body and
+            "<article" not in body and
+            "<section" not in body
+        ):
+            return True
 
     return False
