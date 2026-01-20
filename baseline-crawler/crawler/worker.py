@@ -34,24 +34,40 @@ PATH_BLOCK_RULES = {
     "TAG_PAGE": r"^/tag/",
     "AUTHOR_PAGE": r"^/author/",
     "PAGINATION": r"/page/\d*/?$",
+    "ASSET_DIRECTORY": r"^/(assets|static|media|uploads|images|img|css|js)/",
+}
+
+QUERY_BLOCK_RULES = {
+    "ELEMENTOR_PAGINATION": r"^e-page-",
+    "GENERIC_PAGINATION": r"^(page|paged|p)$",
 }
 
 STATIC_EXTENSIONS = (
-    ".css", ".js", ".png", ".jpg", ".jpeg",
-    ".gif", ".svg", ".ico", ".pdf", ".zip"
+    ".css", ".js", ".png", ".jpg", ".jpeg", ".webp",
+    ".gif", ".svg", ".ico", ".woff", ".woff2",
+    ".ttf", ".eot", ".pdf", ".zip"
 )
 
-BLOCK_REPORT = defaultdict(int)
+BLOCK_REPORT = defaultdict(lambda: {"count": 0, "urls": []})
 BLOCK_LOCK = threading.Lock()
 
 
 def classify_block(url: str):
     parsed = urlparse(url)
+
+    # Block static file extensions first
     if parsed.path.endswith(STATIC_EXTENSIONS):
         return "STATIC"
+
+    # Block blog pages with query parameters like "?e-page-765f5351=12"
+    if parsed.query:
+        if re.search(r'(^|&)(e-page-[0-9a-fA-F]+)=', parsed.query):
+            return "BLOG_EPAGE"
+
     for k, r in PATH_BLOCK_RULES.items():
         if re.search(r, parsed.path.lower()):
             return k
+
     return None
 
 
@@ -121,7 +137,8 @@ class Worker(threading.Thread):
                     # Suppress noisy messages for ignored content types (e.g., images)
                     if isinstance(err, str) and "ignored content type" in err:
                         with BLOCK_LOCK:
-                            BLOCK_REPORT["FETCH_IGNORED_CONTENT_TYPE"] += 1
+                            BLOCK_REPORT["FETCH_IGNORED_CONTENT_TYPE"]["count"] += 1
+                            BLOCK_REPORT["FETCH_IGNORED_CONTENT_TYPE"]["urls"].append(url)
                         continue
                     print(f"[{self.name}] Fetch failed for {url}: {err}")
                     continue
@@ -202,15 +219,18 @@ class Worker(threading.Thread):
                 blocked_rule_count = 0
                 blocked_domain_count = 0
                 for u in urls:
-                    if classify_block(u):
+                    block_type = classify_block(u)
+                    if block_type:
                         with BLOCK_LOCK:
-                            BLOCK_REPORT["BLOCK_RULE"] += 1
+                            BLOCK_REPORT[block_type]["count"] += 1
+                            BLOCK_REPORT[block_type]["urls"].append(u)
                         blocked_rule_count += 1
                         continue
 
                     if not _allowed_domain(self.seed_url, u):
                         with BLOCK_LOCK:
-                            BLOCK_REPORT["DOMAIN_FILTER"] += 1
+                            BLOCK_REPORT["DOMAIN_FILTER"]["count"] += 1
+                            BLOCK_REPORT["DOMAIN_FILTER"]["urls"].append(u)
                         blocked_domain_count += 1
                         continue
 

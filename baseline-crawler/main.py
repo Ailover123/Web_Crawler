@@ -4,6 +4,7 @@ Entry point for the web crawler.
 Uses queue.join() for deterministic crawl completion.
 """
 
+import site
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -24,6 +25,7 @@ from crawler.storage.db import (
 )
 
 from crawler.worker import BLOCK_REPORT
+#from crawler.compare_engine import DEFACEMENT_REPORT
 
 CRAWL_MODE = os.getenv("CRAWL_MODE", "CRAWL").upper()
 assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE")
@@ -99,8 +101,11 @@ def main():
         custid = site["custid"]
 
         # 🔑 Resolve seed FIRST, normalize AFTER
+        from crawler.url_utils import canonicalize_seed
+
         resolved_seed = resolve_seed_url(site["url"])
-        start_url = normalize_url(resolved_seed)
+        start_url = canonicalize_seed(resolved_seed)
+
 
         job_id = str(uuid.uuid4())
 
@@ -190,6 +195,25 @@ if __name__ == "__main__":
         print("\n" + "=" * 60)
         print("BLOCKED URL REPORT")
         print("=" * 60)
-        for block_type, urls in BLOCK_REPORT.items():
-            print(f"[{block_type}] {len(urls)} URLs blocked")
+        for block_type, data in BLOCK_REPORT.items():
+            # New format: dict with 'count' and 'urls'; keep backward compatibility
+            if isinstance(data, dict) and "count" in data:
+                count = data.get("count", 0)
+                urls = data.get("urls", [])
+            elif isinstance(data, int):
+                count = data
+                urls = []
+            else:
+                # fallback for list-like
+                try:
+                    count = len(data)
+                except Exception:
+                    count = 0
+                urls = list(data) if hasattr(data, '__iter__') else []
+
+            print(f"[{block_type}] {count} URLs blocked")
+            if urls:
+                for u in urls:
+                    print(f"  - {u}")
+        print("=" * 60)
         print("=" * 60)
