@@ -10,7 +10,6 @@ from threading import Lock
 from urllib.parse import urlparse
 import logging
 from crawler.normalizer import normalize_url
-from crawler.parser import classify_url
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ class Frontier:
     """
     Thread-safe frontier using a queue, visited set, and in-progress set.
     Prevents duplicate crawling by checking visited before enqueuing.
-    Stores (url, discovered_from, depth) tuples.
+    Stores (url, discovered_from) tuples.
     """
 
     def __init__(self):
@@ -58,7 +57,6 @@ class Frontier:
         self.visited = set()  # URLs that have been crawled
         self.in_progress = set()  # URLs currently being fetched
         self.discovered = set()  # All URLs discovered
-        self.classifications = {}  # URL classifications
         self.lock = Lock()  # Single lock for atomic operations
 
     def enqueue(self, url, discovered_from=None, depth=0):
@@ -89,30 +87,28 @@ class Frontier:
                 self.in_progress.discard(normalized_url)
                 return False
             self.discovered.add(normalized_url)
-            # Store classification
-            try:
-                self.classifications[normalized_url] = classify_url(url)
-            except Exception:
-                logger.debug(f"enqueue: classify_url failed for {url}")
             logger.info(f"enqueue: successfully queued {normalized_url} (discovered_from={discovered_from}) qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
             return True
 
     def dequeue(self):
         """
         Dequeue a URL tuple (url, parent_url).
-        Returns the tuple or None if queue empty.
+        Returns tuple: (item, got_task) where got_task is bool
+        - If URL found: ((url, parent_url), True)
+        - If queue empty: (None, False)
         """
         try:
             item = self.queue.get(block=False)
             logger.debug(f"dequeue: returning item {item} qsize={self.queue.qsize()} in_progress={len(self.in_progress)} visited={len(self.visited)}")
-            return item
+            return (item, True)
         except Exception:
-            return None
+            return (None, False)
 
-    def mark_visited(self, url):
+    def mark_visited(self, url, got_task=True):
         """
         Mark a URL as visited and remove from in-progress.
         This is the only release point.
+        Only calls task_done() if got_task is True (i.e., item was actually dequeued).
         """
         from crawler.normalizer import normalize_url
         normalized = normalize_url(url)
@@ -123,11 +119,14 @@ class Frontier:
             else:
                 logger.debug(f"mark_visited: normalized url not in in_progress: {normalized}")
             self.visited.add(normalized)
-        try:
-            self.queue.task_done()
-        except Exception:
-            # Guard against task_done mismatches
-            logger.debug("queue.task_done() raised an exception in mark_visited")
+        
+        # Only call task_done if we actually dequeued a task
+        if got_task:
+            try:
+                self.queue.task_done()
+            except Exception:
+                # Guard against task_done mismatches
+                logger.debug("queue.task_done() raised an exception in mark_visited")
 
     def is_empty(self):
         """

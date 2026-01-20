@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from crawler.config import USER_AGENT, REQUEST_TIMEOUT
 from crawler.storage.db import get_connection
 
-def fetch(url, discovered_from=None, depth=0):
+def fetch(url, discovered_from=None):
     """
     Fetch a URL, classify outcome, record to DB.
     Returns a dict with 'success', 'response' or 'error'.

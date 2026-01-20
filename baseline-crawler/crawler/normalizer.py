@@ -38,6 +38,27 @@ def normalize_url(url):
         return url
 
 
+def normalize_rendered_html(html_text):
+    """
+    Normalize rendered HTML by removing cache comments and collapsing whitespace.
+    Used for JavaScript-rendered pages to create consistent baseline.
+    
+    Performs:
+    - Strip cache comments (LiteSpeed, CloudFlare, etc.)
+    - Collapse whitespace
+    - Normalize punctuation
+    
+    Returns normalized HTML string.
+    """
+    # First strip cache comments
+    html_cleaned = strip_trivial_comments(html_text)
+    
+    # Then perform semantic normalization
+    html_normalized = semantic_normalize_html(html_cleaned)
+    
+    return html_normalized
+
+
 def strip_trivial_comments(html_text):
   """Remove HTML comments that are known to be cache/footprint noise.
 

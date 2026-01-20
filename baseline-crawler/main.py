@@ -120,7 +120,7 @@ def main():
             )
 
             frontier = Frontier()
-            frontier.enqueue(start_url, None, 0)
+            frontier.enqueue(start_url, None)
 
             workers = []
             start_time = time.time()

@@ -15,7 +15,7 @@ from pathlib import Path
 
 def get_ist_timestamp():
     """Get current timestamp in IST (India Standard Time)"""
-    utc_now = datetime.datetime.utcnow()
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
     ist_offset = datetime.timedelta(hours=5, minutes=30)
     ist_now = utc_now + ist_offset
     return ist_now

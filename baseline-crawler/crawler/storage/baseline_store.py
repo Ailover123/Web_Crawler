@@ -106,3 +106,29 @@ def load_all_baseline_pages(custid: int, site_folder_id: str) -> list[str]:
             continue
 
     return pages
+
+
+def store_baseline_hash(*, site_id: int, normalized_url: str, raw_html: str, baseline_path: str):
+    """
+    Store baseline hash metadata (for future comparison).
+    This is a placeholder for hash-based comparison in COMPARE mode.
+    
+    Args:
+        site_id: Site ID
+        normalized_url: Normalized URL
+        raw_html: Raw HTML content
+        baseline_path: Path where HTML was stored
+    
+    Returns: None (metadata is stored internally for now)
+    """
+    # In future, this could store hash to database for rapid comparison
+    # For now, the comparison engine will load and compute hashes as needed
+    import hashlib
+    
+    # Compute and store hash for later comparison
+    html_hash = hashlib.sha256(raw_html.encode('utf-8')).hexdigest()
+    
+    # Could log this for audit trail
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug(f"Baseline stored: site_id={site_id}, url={normalized_url}, hash={html_hash[:8]}..., path={baseline_path}")

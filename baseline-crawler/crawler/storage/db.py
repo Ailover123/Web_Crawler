@@ -4,6 +4,9 @@ All DB access is routed through MySQL only
 """
 
 from .mysql import (
+    # connection
+    get_connection,
+    
     # existing writes
     insert_crawl_page,
     insert_baseline,
@@ -23,6 +26,9 @@ from .mysql import (
 # Explicit exports
 # -------------------------------------------------
 __all__ = [
+    # connection
+    "get_connection",
+    
     # crawl data
     "insert_crawl_page",
     "insert_baseline",

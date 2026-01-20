@@ -1,15 +1,18 @@
 # crawler/parser.py
-# Purpose: URL extraction and classification from HTML for the crawler.
+# Purpose: URL extraction from HTML for the crawler.
 # Phase: Analysis / Observability
 # Output: Extracted URLs and assets from HTML pages.
-# Notes: Extracts navigational URLs and assets, classifies URLs into types.
+# Notes: Extracts navigational URLs and assets from HTML.
 
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+from .normalizer import normalize_url
 
 def classify_url(url):
     """
-    Classify a URL into zero or more types: normal_html, pagination, assets_uploads, media, scripts_styles, api_like, unknown.
+    Classify a URL into zero or more types: normal_html, pagination, assets_uploads, media, scripts_styles, api_like.
+    OFFLINE ANALYSIS ONLY - not used during crawl.
+    Used by analysis_generator.py for reporting purposes.
     Returns a set of types the URL belongs to.
     """
     types = set()
@@ -46,6 +49,7 @@ def classify_url(url):
 def extract_urls(html, base_url):
     """
     Extract URLs from HTML, including navigational and assets, filter to same domain, http/https.
+    Normalizes URLs to remove trailing slashes.
     Returns list of absolute URLs to crawl and assets.
     """
     soup = BeautifulSoup(html, 'html.parser')
@@ -56,30 +60,35 @@ def extract_urls(html, base_url):
     # Extract from <a href>
     for a in soup.find_all('a', href=True):
         url = urljoin(base_url, a['href'])
+        url = normalize_url(url)  # Normalize to remove trailing slashes
         if _is_allowed_url(url, base_domain):
             urls.append(url)
 
     # Extract assets from <img src>
     for img in soup.find_all('img', src=True):
         asset_url = urljoin(base_url, img['src'])
+        asset_url = normalize_url(asset_url)  # Normalize to remove trailing slashes
         if _is_allowed_url(asset_url, base_domain):
             assets.append(asset_url)
 
     # Extract assets from <link rel="icon">
     for link in soup.find_all('link', rel='icon', href=True):
         asset_url = urljoin(base_url, link['href'])
+        asset_url = normalize_url(asset_url)  # Normalize to remove trailing slashes
         if _is_allowed_url(asset_url, base_domain):
             assets.append(asset_url)
 
     # Extract assets from <link rel="stylesheet">
     for link in soup.find_all('link', rel='stylesheet', href=True):
         asset_url = urljoin(base_url, link['href'])
+        asset_url = normalize_url(asset_url)  # Normalize to remove trailing slashes
         if _is_allowed_url(asset_url, base_domain):
             assets.append(asset_url)
 
     # Extract assets from <script src>
     for script in soup.find_all('script', src=True):
         asset_url = urljoin(base_url, script['src'])
+        asset_url = normalize_url(asset_url)  # Normalize to remove trailing slashes
         if _is_allowed_url(asset_url, base_domain):
             assets.append(asset_url)
 
