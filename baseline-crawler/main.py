@@ -60,9 +60,9 @@ def resolve_seed_url(raw_url: str) -> str:
         try:
             r = requests.get(
                 u,
-                timeout=8,
+                timeout=12,
                 allow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0"},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"},
             )
             if r.status_code < 400:
                 # lock final resolved URL
@@ -140,7 +140,7 @@ def main():
                     siteid_map=siteid_map,
                     job_id=job_id,
                     crawl_mode=CRAWL_MODE,
-                    seed_url=start_url,   # 🔒 SINGLE SOURCE OF TRUTH
+                    seed_url=site["url"], # 🔒 USE REGISTERED URL FOR NAMING PREFERENCE
                 )
                 w.start()
                 workers.append(w)

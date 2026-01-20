@@ -76,11 +76,24 @@ def classify_block(url: str):
 # ==================================================
 
 def _allowed_domain(seed_url: str, candidate_url: str) -> bool:
-    seed_netloc = urlparse(seed_url).netloc.lower().split(":")[0]
-    cand_netloc = urlparse(candidate_url).netloc.lower().split(":")[0]
+    """
+    Checks if candidate_url is within the same registrable domain as seed_url.
+    Resilient to missing schemes in seed_url.
+    """
+    # Ensure both have schemes for reliable parsing
+    from crawler.normalizer import normalize_url
+    
+    s_parsed = urlparse(normalize_url(seed_url))
+    c_parsed = urlparse(normalize_url(candidate_url))
+    
+    s_netloc = s_parsed.netloc.lower().split(":")[0]
+    c_netloc = c_parsed.netloc.lower().split(":")[0]
 
-    base = seed_netloc[4:] if seed_netloc.startswith("www.") else seed_netloc
-    return cand_netloc == base or cand_netloc == f"www.{base}"
+    # Normalize hosts (strip www.)
+    base_s = s_netloc[4:] if s_netloc.startswith("www.") else s_netloc
+    base_c = c_netloc[4:] if c_netloc.startswith("www.") else c_netloc
+    
+    return base_s == base_c
 
 
 # ==================================================
@@ -158,6 +171,7 @@ class Worker(threading.Thread):
                     "content_length": len(resp.content),
                     "response_time_ms": int((time.time() - start) * 1000),
                     "fetched_at": fetched_at,
+                    "base_url": self.seed_url, # Pass preference
                 })
 
                 if "text/html" not in ct.lower():
@@ -198,6 +212,7 @@ class Worker(threading.Thread):
                         url=url,
                         html=html,
                         crawl_mode="BASELINE",
+                        base_url=self.seed_url,
                     )
 
                     store_baseline_hash(
@@ -205,6 +220,7 @@ class Worker(threading.Thread):
                         normalized_url=normalize_url(url),
                         raw_html=html,
                         baseline_path=path,
+                        base_url=self.seed_url,
                     )
 
                 elif self.crawl_mode == "COMPARE":
@@ -212,6 +228,7 @@ class Worker(threading.Thread):
                         siteid=self.siteid,
                         url=url,
                         html=html,
+                        base_url=self.seed_url,
                     )
 
                 # ---------------- ENQUEUE ----------------

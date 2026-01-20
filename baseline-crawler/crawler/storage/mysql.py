@@ -3,6 +3,7 @@ from mysql.connector import Error
 import os
 from dotenv import load_dotenv
 from crawler.storage.db_guard import DB_SEMAPHORE
+from crawler.normalizer import get_canonical_id
 
 load_dotenv()
 
@@ -112,6 +113,13 @@ def fail_crawl_job(job_id, err):
 
 
 def insert_crawl_page(data):
+    # Pass seed_url if available to ensure domain matches sites table
+    base_url = data.get("base_url")
+    canonical_url = get_canonical_id(data["url"], base_url)
+    if not canonical_url:
+        # Home page skip
+        return
+
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -121,10 +129,17 @@ def insert_crawl_page(data):
             (job_id, custid, siteid, url, parent_url, depth, status_code,
              content_type, content_length, response_time_ms, fetched_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON DUPLICATE KEY UPDATE
+                job_id=VALUES(job_id),
+                status_code=VALUES(status_code),
+                content_type=VALUES(content_type),
+                content_length=VALUES(content_length),
+                response_time_ms=VALUES(response_time_ms),
+                fetched_at=VALUES(fetched_at)
             """,
             (
                 data["job_id"], data["custid"], data["siteid"],
-                data["url"], data["parent_url"], data["depth"],
+                canonical_url, data["parent_url"], data["depth"],
                 data["status_code"], data["content_type"],
                 data["content_length"], data["response_time_ms"],
                 data["fetched_at"],
@@ -137,7 +152,11 @@ def insert_crawl_page(data):
         DB_SEMAPHORE.release()
 
 
-def insert_defacement_site(siteid, baseline_id, url):
+def insert_defacement_site(siteid, baseline_id, url, base_url=None):
+    canonical_url = get_canonical_id(url, base_url)
+    if not canonical_url:
+        return
+
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -149,7 +168,7 @@ def insert_defacement_site(siteid, baseline_id, url):
                 baseline_id=VALUES(baseline_id),
                 action='selected'
             """,
-            (siteid, baseline_id, url),
+            (siteid, baseline_id, canonical_url),
         )
         conn.commit()
     finally:
@@ -162,10 +181,15 @@ def insert_defacement_site(siteid, baseline_id, url):
 # BASELINE HASH HELPERS (IMMUTABLE)
 # ============================================================
 
-def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path):
+def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, base_url=None):
     """
-    Baseline pages are INSERTED ONCE and NEVER UPDATED.
+    Baseline pages are INSERTED ONCE and NEVER UPDATED from the crawler.
+    Uses INSERT IGNORE to protect existing baselines.
     """
+    canonical_url = get_canonical_id(normalized_url, base_url)
+    if not canonical_url:
+        return
+
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -175,7 +199,7 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path):
                 (site_id, normalized_url, content_hash, baseline_path)
             VALUES (%s, %s, %s, %s)
             """,
-            (site_id, normalized_url, content_hash, baseline_path),
+            (site_id, canonical_url, content_hash, baseline_path),
         )
         conn.commit()
     finally:
@@ -184,17 +208,19 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path):
         DB_SEMAPHORE.release()
 
 
-def fetch_baseline_hash(site_id, normalized_url):
+def fetch_baseline_hash(site_id, normalized_url, base_url=None):
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
+        # Use canonical "Domain/Path" for lookup
+        canonical_url = get_canonical_id(normalized_url, base_url)
         cur.execute(
             """
             SELECT content_hash
             FROM baseline_pages
             WHERE site_id=%s AND normalized_url=%s
             """,
-            (site_id, normalized_url),
+            (site_id, canonical_url),
         )
         return cur.fetchone()
     finally:
@@ -216,7 +242,12 @@ def insert_observed_page(
     diff_path=None,
     defacement_score=None,
     defacement_severity=None,
+    base_url=None,
 ):
+    canonical_url = get_canonical_id(normalized_url, base_url)
+    if not canonical_url:
+        return
+
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -228,6 +259,7 @@ def insert_observed_page(
                  defacement_score, defacement_severity)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
+                baseline_id = VALUES(baseline_id),
                 observed_hash = VALUES(observed_hash),
                 changed = VALUES(changed),
                 diff_path = VALUES(diff_path),
@@ -237,7 +269,7 @@ def insert_observed_page(
             (
                 site_id,
                 baseline_id,
-                normalized_url,
+                canonical_url,
                 observed_hash,
                 changed,
                 diff_path,

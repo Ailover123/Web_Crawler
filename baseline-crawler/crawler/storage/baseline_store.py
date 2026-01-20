@@ -24,7 +24,7 @@ def _next_baseline_id(site_dir: Path, siteid: int) -> str:
     return f"{siteid}-{max_seq + 1}"
 
 
-def store_snapshot_file(*, custid, siteid, url, html, crawl_mode):
+def store_snapshot_file(*, custid, siteid, url, html, crawl_mode, base_url=None):
     site_dir = BASELINE_ROOT / str(custid) / str(siteid)
     site_dir.mkdir(parents=True, exist_ok=True)
 
@@ -37,12 +37,13 @@ def store_snapshot_file(*, custid, siteid, url, html, crawl_mode):
             siteid=siteid,
             baseline_id=baseline_id,
             url=url,
+            base_url=base_url,
         )
 
     return baseline_id, path.name, str(path)
 
 
-def store_baseline_hash(*, site_id, normalized_url, raw_html, baseline_path):
+def store_baseline_hash(*, site_id, normalized_url, raw_html, baseline_path, base_url=None):
     content_hash = sha256(normalize_html(raw_html))
 
     upsert_baseline_hash(
@@ -50,6 +51,7 @@ def store_baseline_hash(*, site_id, normalized_url, raw_html, baseline_path):
         normalized_url=normalized_url,
         content_hash=content_hash,
         baseline_path=baseline_path,
+        base_url=base_url,
     )
 
     return content_hash

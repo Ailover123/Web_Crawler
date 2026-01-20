@@ -33,7 +33,7 @@ class CompareEngine:
             print(f"[COMPARE] Loaded {len(self._rows)} defacement row(s)")
         return self._rows
 
-    def handle_page(self, *, siteid: int, url: str, html: str):
+    def handle_page(self, *, siteid: int, url: str, html: str, base_url: str | None = None):
         rows = self._load_rows()
         if not rows:
             print(f"[COMPARE] No defacement rows to compare. Skipping {url}")
@@ -66,9 +66,9 @@ class CompareEngine:
 
             # Try both versions of the URL for baseline lookup
             baseline = (
-                get_baseline_hash(site_id=siteid, normalized_url=canon_url)
-                or get_baseline_hash(site_id=siteid, normalized_url=canon_url_slash)
-                or get_baseline_hash(site_id=siteid, normalized_url=canon_url_noslash)
+                get_baseline_hash(site_id=siteid, normalized_url=canon_url, base_url=base_url)
+                or get_baseline_hash(site_id=siteid, normalized_url=canon_url_slash, base_url=base_url)
+                or get_baseline_hash(site_id=siteid, normalized_url=canon_url_noslash, base_url=base_url)
             )
 
             if not baseline:
@@ -90,6 +90,7 @@ class CompareEngine:
                         diff_path=None,
                         defacement_score=0.0,
                         defacement_severity="NONE",
+                        base_url=base_url,
                     )
                 except Exception as e:
                     print(f"[COMPARE]   [ERROR] Failed to insert unchanged: {e}")
@@ -145,6 +146,7 @@ class CompareEngine:
                     diff_path=str(diff_dir / f"{file_prefix}.html"),
                     defacement_score=score,
                     defacement_severity=severity,
+                    base_url=base_url,
                 )
             except Exception as e:
                 print(f"[COMPARE]   [ERROR] Failed to insert change: {e}")

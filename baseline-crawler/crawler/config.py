@@ -17,7 +17,7 @@ MAX_PAGES = 100
 ALLOWED_DOMAINS = []
 
 # Network timeout for HTTP requests (seconds)
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 20
 
 # User-Agent string for crawler identification
 # Use a modern browser UA to reduce bot challenges
