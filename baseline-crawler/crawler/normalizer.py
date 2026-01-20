@@ -14,10 +14,11 @@ from bs4 import BeautifulSoup
 # URL NORMALIZATION
 # -------------------------
 
-def normalize_url(url: str, *, base: str | None = None) -> str:
+def normalize_url(url: str, *, base: str | None = None, preference_url: str | None = None) -> str:
     """
     Standard normalization for fetching. 
-    Ensures scheme and domain are consistent but KEEPS them for valid HTTP requests.
+    If preference_url is provided, it forces the domain to match the preference
+    if they are base-equivalent (e.g. www vs non-www).
     """
     if not url:
         return ""
@@ -36,8 +37,23 @@ def normalize_url(url: str, *, base: str | None = None) -> str:
     scheme = parsed.scheme.lower() if parsed.scheme else "http"
     netloc = parsed.netloc.lower()
     
+    # Apply Branding Preference
+    if preference_url:
+        p_parsed = urlparse(preference_url if "://" in preference_url else "http://" + preference_url)
+        p_netloc = p_parsed.netloc.lower()
+        
+        # Strip ports for comparison
+        clean_netloc = netloc.split(":")[0]
+        clean_pref = p_netloc.split(":")[0]
+        
+        # Basic equivalency check (e.g. sitewall.net vs www.sitewall.net)
+        base_netloc = clean_netloc[4:] if clean_netloc.startswith("www.") else clean_netloc
+        base_pref = clean_pref[4:] if clean_pref.startswith("www.") else clean_pref
+        
+        if base_netloc == base_pref:
+            netloc = p_netloc # Force exact match to preference
+
     # Standardize: Strip trailing slash to avoid duplicate fetches
-    # of "example.com/about/" and "example.com/about"
     path = (parsed.path or "/").rstrip("/")
     if not path:
         path = "/"

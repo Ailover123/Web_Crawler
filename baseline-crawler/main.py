@@ -125,7 +125,7 @@ def main():
             )
 
             frontier = Frontier()
-            frontier.enqueue(start_url, None, 0)
+            frontier.enqueue(start_url, None, 0, preference_url=site["url"])
 
             workers = []
             start_time = time.time()

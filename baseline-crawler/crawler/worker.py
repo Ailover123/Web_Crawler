@@ -77,23 +77,19 @@ def classify_block(url: str):
 
 def _allowed_domain(seed_url: str, candidate_url: str) -> bool:
     """
-    Checks if candidate_url is within the same registrable domain as seed_url.
-    Resilient to missing schemes in seed_url.
+    Strict domain check. Since normalize_url now handles branding preferences,
+    we just need to check if the netlocs match exactly after preference-aware normalization.
     """
-    # Ensure both have schemes for reliable parsing
     from crawler.normalizer import normalize_url
     
-    s_parsed = urlparse(normalize_url(seed_url))
-    c_parsed = urlparse(normalize_url(candidate_url))
+    # Normalize BOTH with the same seed_url as preference
+    s_norm = normalize_url(seed_url, preference_url=seed_url)
+    c_norm = normalize_url(candidate_url, preference_url=seed_url)
     
-    s_netloc = s_parsed.netloc.lower().split(":")[0]
-    c_netloc = c_parsed.netloc.lower().split(":")[0]
+    s_netloc = urlparse(s_norm).netloc.lower().split(":")[0]
+    c_netloc = urlparse(c_norm).netloc.lower().split(":")[0]
 
-    # Normalize hosts (strip www.)
-    base_s = s_netloc[4:] if s_netloc.startswith("www.") else s_netloc
-    base_c = c_netloc[4:] if c_netloc.startswith("www.") else c_netloc
-    
-    return base_s == base_c
+    return s_netloc == c_netloc
 
 
 # ==================================================
@@ -217,7 +213,7 @@ class Worker(threading.Thread):
 
                     store_baseline_hash(
                         site_id=self.siteid,
-                        normalized_url=normalize_url(url),
+                        normalized_url=normalize_url(url, preference_url=self.seed_url),
                         raw_html=html,
                         baseline_path=path,
                         base_url=self.seed_url,
@@ -251,7 +247,7 @@ class Worker(threading.Thread):
                         blocked_domain_count += 1
                         continue
 
-                    self.frontier.enqueue(u, url, depth + 1)
+                    self.frontier.enqueue(u, url, depth + 1, preference_url=self.seed_url)
                     enqueued_count += 1
 
                 if enqueued_count > 0:
@@ -272,7 +268,7 @@ class Worker(threading.Thread):
                 print(f"[{self.name}] Traceback: {traceback.format_exc()}")
 
             finally:
-                self.frontier.mark_visited(url, got_task=got_task)
+                self.frontier.mark_visited(url, got_task=got_task, preference_url=self.seed_url)
 
     def stop(self):
         self.running = False
