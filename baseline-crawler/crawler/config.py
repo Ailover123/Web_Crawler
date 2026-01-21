@@ -5,12 +5,6 @@ from pathlib import Path
 # No depth logic, normalization, or defacement detection here.
 
 
-# Maximum crawl depth
-# 0 = only seed URLs
-DEPTH_LIMIT = 2
-# Maximum number of pages to crawl per run
-MAX_PAGES = 100
-
 
 # Domains allowed to crawl
 # Empty = restrict to seed domains only
@@ -21,12 +15,7 @@ REQUEST_TIMEOUT = 20
 
 # User-Agent string for crawler identification
 # Use a modern browser UA to reduce bot challenges
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0 Safari/537.36"
-)
-
+USER_AGENT = "Chrome/126.0.0.0" 
 # Canonical data directory for the crawler. Set to the `data` folder
 # located inside the `baseline-crawler` package.
 try:

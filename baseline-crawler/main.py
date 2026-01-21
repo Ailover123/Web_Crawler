@@ -171,7 +171,12 @@ def main():
             print(f"Customer ID       : {custid}")
             print(f"Site ID           : {siteid}")
             print(f"Seed URL          : {start_url}")
+            total_saved = sum(w.saved_count for w in workers)
+            total_duplicates = sum(w.duplicate_count for w in workers)
+
             print(f"Total URLs visited: {stats['visited_count']}")
+            print(f"Unique Pages Saved: {total_saved}")
+            print(f"Duplicates Skipped: {total_duplicates}")
             print(f"Crawl duration    : {duration:.2f} seconds")
             print(f"Workers used      : {len(workers)}")
             print("-" * 60)

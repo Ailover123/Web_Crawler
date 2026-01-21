@@ -3,7 +3,7 @@
 from pathlib import Path
 from crawler.storage.db import insert_defacement_site
 from crawler.storage.mysql import upsert_baseline_hash
-from crawler.normalizer import normalize_html
+from crawler.normalizer import normalize_html, normalize_url
 from crawler.hasher import sha256
 
 import threading
@@ -21,7 +21,6 @@ def _next_baseline_id(site_dir: Path, siteid: int) -> str:
     Uses an in-memory cache to avoid O(N) disk scans on every write.
     """
     with _ID_LOCK:
-        # Lazy initialization: scan disk only once per site per run
         if siteid not in _SITE_MAX_IDS:
             max_seq = 0
             prefix = f"{siteid}-"
@@ -39,39 +38,55 @@ def _next_baseline_id(site_dir: Path, siteid: int) -> str:
             
             _SITE_MAX_IDS[siteid] = max_seq
 
-        # Increment and return unique ID
         _SITE_MAX_IDS[siteid] += 1
         return f"{siteid}-{_SITE_MAX_IDS[siteid]}"
 
 
-def store_snapshot_file(*, custid, siteid, url, html, crawl_mode, base_url=None):
+def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
+    """
+    Tries to insert the baseline hash into the DB FIRST.
+    If the DB accepts it (new unique content for this URL), writes the file to disk.
+    If the DB rejects it (duplicate URL), skips writing the file.
+    
+    Returns:
+        (baseline_id, path_str) if saved.
+        (None, None) if duplicate/skipped.
+    """
+    # 1. Prepare Data
     site_dir = BASELINE_ROOT / str(custid) / str(siteid)
     site_dir.mkdir(parents=True, exist_ok=True)
 
+    # Note: We generate a candidate ID. If we don't use it (duplicate), 
+    # we just burn the sequence number. This is fine.
     baseline_id = _next_baseline_id(site_dir, siteid)
     path = site_dir / f"{baseline_id}.html"
-    path.write_text(html.strip(), encoding="utf-8")
+    
+    normalized_url = normalize_url(url, preference_url=base_url)
+    content_hash = sha256(normalize_html(html))
 
-    if crawl_mode.upper() == "BASELINE":
-        insert_defacement_site(
-            siteid=siteid,
-            baseline_id=baseline_id,
-            url=url,
-            base_url=base_url,
-        )
-
-    return baseline_id, path.name, str(path)
-
-
-def store_baseline_hash(*, site_id, normalized_url, raw_html, baseline_path, base_url=None):
-    content_hash = sha256(normalize_html(raw_html))
-
-    upsert_baseline_hash(
-        site_id=site_id,
+    # 2. Try DB Insert
+    inserted = upsert_baseline_hash(
+        site_id=siteid,
         normalized_url=normalized_url,
         content_hash=content_hash,
-        baseline_path=baseline_path,
+        baseline_path=str(path),
         base_url=base_url,
     )
 
-    return content_hash
+    if not inserted:
+        return None, None
+
+    # 3. Write File (Only if DB accepted)
+    path.write_text(html.strip(), encoding="utf-8")
+
+    # 4. Link to Defacement Site (Legacy logic, but correct for Reference)
+    # This table tracks "Seed URLs that have baselines". 
+    # If the URL is redundant, we don't add it here either.
+    insert_defacement_site(
+        siteid=siteid,
+        baseline_id=baseline_id,
+        url=url,
+        base_url=base_url,
+    )
+
+    return baseline_id, str(path)

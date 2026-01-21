@@ -14,8 +14,7 @@ from crawler.normalizer import (
 )
 from crawler.storage.db import insert_crawl_page
 from crawler.storage.baseline_store import (
-    store_snapshot_file,
-    store_baseline_hash,
+    save_baseline_if_unique,
 )
 from crawler.compare_engine import CompareEngine
 
@@ -131,6 +130,10 @@ class Worker(threading.Thread):
             if crawl_mode == "COMPARE"
             else None
         )
+        
+        # Stats
+        self.saved_count = 0
+        self.duplicate_count = 0
 
     def run(self):
         print(f"[{self.name}] started ({self.crawl_mode})")
@@ -213,24 +216,23 @@ class Worker(threading.Thread):
                     print(f"[{self.name}] Extracted {len(urls)} URLs from {url}")
 
                 # ---------------- MODE LOGIC ----------------
+                # ---------------- MODE LOGIC ----------------
                 if self.crawl_mode == "BASELINE":
-                    baseline_id, _, path = store_snapshot_file(
+                    baseline_id, path = save_baseline_if_unique(
                         custid=self.custid,
                         siteid=self.siteid,
                         url=url,
                         html=html,
-                        crawl_mode="BASELINE",
                         base_url=self.seed_url,
                     )
 
-                    store_baseline_hash(
-                        site_id=self.siteid,
-                        normalized_url=normalize_url(url, preference_url=self.seed_url),
-                        raw_html=html,
-                        baseline_path=path,
-                        base_url=self.seed_url,
-                    )
-                    print(f"[{self.name}] DB: Saved baseline hash for {url}")
+                    if baseline_id:
+                        self.saved_count += 1
+                        print(f"[{self.name}] DB: Saved baseline hash for {url}")
+                    else:
+                        self.duplicate_count += 1
+                        print(f"[{self.name}] DB: Duplicate URL skipped for {url}")
+
 
                 elif self.crawl_mode == "COMPARE":
                     self.compare_engine.handle_page(

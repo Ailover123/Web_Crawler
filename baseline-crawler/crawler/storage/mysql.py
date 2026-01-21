@@ -189,10 +189,12 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
     """
     Baseline pages are INSERTED ONCE and NEVER UPDATED from the crawler.
     Uses INSERT IGNORE to protect existing baselines.
+    Returns:
+        bool: True if inserted, False if duplicate/ignored.
     """
     canonical_url = get_canonical_id(normalized_url, base_url)
     if not canonical_url:
-        return
+        return False
 
     conn = get_connection()
     try:
@@ -206,6 +208,7 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
             (site_id, canonical_url, content_hash, baseline_path),
         )
         conn.commit()
+        return cur.rowcount > 0
     finally:
         cur.close()
         conn.close()
