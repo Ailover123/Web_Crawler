@@ -106,9 +106,9 @@ def get_canonical_id(url: str, base_url: str | None = None) -> str:
     path = (parsed.path or "").strip("/")
     query = f"?{parsed.query}" if parsed.query else ""
     
-    # Home Page Skip: If it's just the root domain with no path or query
-    if not path and not query:
-        return ""
+    # Home Page Skip: REMOVED to allow baseline storage of root domain
+    # if not path and not query:
+    #     return ""
     
     return f"{netloc}/{path}{query}".strip("/")
 

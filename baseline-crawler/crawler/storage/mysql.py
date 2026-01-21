@@ -117,7 +117,10 @@ def insert_crawl_page(data):
     base_url = data.get("base_url")
     canonical_url = get_canonical_id(data["url"], base_url)
     if not canonical_url:
-        # Home page skip
+        return
+
+    # User Req: Skip root domain for crawl_pages table ONLY
+    if "/" not in canonical_url:
         return
 
     conn = get_connection()
@@ -146,6 +149,7 @@ def insert_crawl_page(data):
             ),
         )
         conn.commit()
+        return "Inserted" if cur.rowcount == 1 else "Updated"
     finally:
         cur.close()
         conn.close()

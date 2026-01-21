@@ -92,6 +92,7 @@ class CompareEngine:
                         defacement_severity="NONE",
                         base_url=base_url,
                     )
+                    print(f"[COMPARE]   DB: Inserted observed_page (UNCHANGED) for {url}")
                 except Exception as e:
                     print(f"[COMPARE]   [ERROR] Failed to insert unchanged: {e}")
                 continue
@@ -148,6 +149,7 @@ class CompareEngine:
                     defacement_severity=severity,
                     base_url=base_url,
                 )
+                print(f"[COMPARE]   DB: Inserted observed_page (CHANGED) for {url}")
             except Exception as e:
                 print(f"[COMPARE]   [ERROR] Failed to insert change: {e}")
 

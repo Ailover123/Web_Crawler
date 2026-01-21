@@ -38,8 +38,8 @@ PATH_BLOCK_RULES = {
 }
 
 QUERY_BLOCK_RULES = {
-    "ELEMENTOR_PAGINATION": r"^e-page-",
-    "GENERIC_PAGINATION": r"^(page|paged|p)$",
+    "ELEMENTOR_PAGINATION": r"e-page-",
+    "GENERIC_PAGINATION": r"(page|paged|p)",
 }
 
 STATIC_EXTENSIONS = (
@@ -61,8 +61,18 @@ def classify_block(url: str):
 
     # Block blog pages with query parameters like "?e-page-765f5351=12"
     if parsed.query:
+        # Check hardcoded e-page rule
         if re.search(r'(^|&)(e-page-[0-9a-fA-F]+)=', parsed.query):
             return "BLOG_EPAGE"
+            
+        # Check defined QUERY_BLOCK_RULES
+        for k, r in QUERY_BLOCK_RULES.items():
+            # Create a regex to match the parameter name followed by '='
+            # The rule 'r' matches the key name, e.g. "^(page|paged|p)$"
+            # We look for: (Start or &) + (Rule) + (=)
+            pattern = fr'(^|&){r}='
+            if re.search(pattern, parsed.query.lower()):
+                return k
 
     for k, r in PATH_BLOCK_RULES.items():
         if re.search(r, parsed.path.lower()):
@@ -155,7 +165,7 @@ class Worker(threading.Thread):
                 resp = result["response"]
                 ct = resp.headers.get("Content-Type", "")
 
-                insert_crawl_page({
+                db_action = insert_crawl_page({
                     "job_id": self.job_id,
                     "custid": self.custid,
                     "siteid": self.siteid,
@@ -169,6 +179,8 @@ class Worker(threading.Thread):
                     "fetched_at": fetched_at,
                     "base_url": self.seed_url, # Pass preference
                 })
+                if db_action:
+                    print(f"[{self.name}] DB: {db_action} crawl_pages for {url}")
 
                 if "text/html" not in ct.lower():
                     continue
@@ -194,7 +206,7 @@ class Worker(threading.Thread):
                 urls, _ = extract_urls(html, url)
 
                 if not urls:
-                    print(f"[{self.name}] ⚠️  No URLs extracted from {url}")
+                    print(f"[{self.name}] [WARN] No URLs extracted from {url}")
                     print(f"[{self.name}]    HTML size: {len(html)} bytes")
                     print(f"[{self.name}]    Possible cause: JS-rendered content or minimal links")
                 else:
@@ -218,6 +230,7 @@ class Worker(threading.Thread):
                         baseline_path=path,
                         base_url=self.seed_url,
                     )
+                    print(f"[{self.name}] DB: Saved baseline hash for {url}")
 
                 elif self.crawl_mode == "COMPARE":
                     self.compare_engine.handle_page(

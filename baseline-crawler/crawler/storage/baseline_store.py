@@ -6,22 +6,42 @@ from crawler.storage.mysql import upsert_baseline_hash
 from crawler.normalizer import normalize_html
 from crawler.hasher import sha256
 
+import threading
+
 BASELINE_ROOT = Path("baselines")
+
+# Global lock and cache for sequence numbers
+_ID_LOCK = threading.Lock()
+_SITE_MAX_IDS = {}
 
 
 def _next_baseline_id(site_dir: Path, siteid: int) -> str:
-    max_seq = 0
-    prefix = f"{siteid}-"
+    """
+    Thread-safe generation of the next baseline ID.
+    Uses an in-memory cache to avoid O(N) disk scans on every write.
+    """
+    with _ID_LOCK:
+        # Lazy initialization: scan disk only once per site per run
+        if siteid not in _SITE_MAX_IDS:
+            max_seq = 0
+            prefix = f"{siteid}-"
+            
+            if site_dir.exists():
+                for f in site_dir.glob(f"{siteid}-*.html"):
+                    try:
+                        stem = f.stem
+                        if stem.startswith(prefix):
+                            num = int(stem[len(prefix):])
+                            if num > max_seq:
+                                max_seq = num
+                    except ValueError:
+                        pass
+            
+            _SITE_MAX_IDS[siteid] = max_seq
 
-    for f in site_dir.glob(f"{siteid}-*.html"):
-        stem = f.stem
-        if stem.startswith(prefix):
-            try:
-                max_seq = max(max_seq, int(stem[len(prefix):]))
-            except ValueError:
-                pass
-
-    return f"{siteid}-{max_seq + 1}"
+        # Increment and return unique ID
+        _SITE_MAX_IDS[siteid] += 1
+        return f"{siteid}-{_SITE_MAX_IDS[siteid]}"
 
 
 def store_snapshot_file(*, custid, siteid, url, html, crawl_mode, base_url=None):
