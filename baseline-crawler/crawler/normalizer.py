@@ -44,9 +44,43 @@ def normalize_url(url: str, *, base: str | None = None) -> str:
 # HTML NORMALIZATION (FOR HASHING / DIFF)
 # -------------------------
 
+def normalize_url(url: str, *, base: str | None = None) -> str:
+    if not url:
+        return ""
+
+    url = url.strip()
+
+    if base:
+        url = urljoin(base, url)
+
+    parsed = urlparse(url)
+
+    scheme = parsed.scheme.lower() if parsed.scheme else "http"
+    netloc = parsed.netloc.lower()
+
+    # --- FIX: canonicalize path ---
+    path = parsed.path or "/"
+
+    # 🔥 REMOVE trailing slash except root
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+
+    query = parsed.query
+
+    return urlunparse((
+        scheme,
+        netloc,
+        path,
+        "",
+        query,
+        ""
+    ))
+
+from bs4 import BeautifulSoup
+
 def normalize_html(html: str) -> str:
     """
-    Normalize HTML ONLY for hashing & comparison.
+    Normalize HTML ONLY for hashing / comparison.
     This must be deterministic.
     """
     if not html:
@@ -65,7 +99,6 @@ def normalize_html(html: str) -> str:
     )
 
     return normalized
-
 
 # -------------------------
 # JS RENDER NORMALIZATION

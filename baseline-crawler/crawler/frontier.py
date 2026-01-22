@@ -48,7 +48,7 @@ class Frontier:
 
             self.in_progress.add(normalized)
             try:
-                self.queue.put((url, discovered_from, depth))
+                self.queue.put((normalized, discovered_from, depth))
             except Exception:
                 self.in_progress.discard(normalized)
                 return False
