@@ -34,12 +34,13 @@ def normalize_url(url: str, *, base: str | None = None, preference_url: str | No
 
     parsed = urlparse(url)
 
-    scheme = parsed.scheme.lower() if parsed.scheme else "http"
+    # Force HTTPS for all web URLs to save bandwidth and prevent canonical duplicates
+    scheme = "https"
     netloc = parsed.netloc.lower()
     
     # Apply Branding Preference
     if preference_url:
-        p_parsed = urlparse(preference_url if "://" in preference_url else "http://" + preference_url)
+        p_parsed = urlparse(preference_url if "://" in preference_url else "https://" + preference_url)
         p_netloc = p_parsed.netloc.lower()
         
         # Strip ports for comparison

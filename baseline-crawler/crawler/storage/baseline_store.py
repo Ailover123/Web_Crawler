@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from crawler.storage.db import insert_defacement_site
-from crawler.storage.mysql import upsert_baseline_hash
+from crawler.storage.mysql import upsert_baseline_hash, fetch_baseline_hash
 from crawler.normalizer import normalize_html, normalize_url
 from crawler.hasher import sha256
 
@@ -52,19 +52,29 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
         (baseline_id, path_str) if saved.
         (None, None) if duplicate/skipped.
     """
-    # 1. Prepare Data
-    site_dir = BASELINE_ROOT / str(custid) / str(siteid)
-    site_dir.mkdir(parents=True, exist_ok=True)
-
-    # Note: We generate a candidate ID. If we don't use it (duplicate), 
-    # we just burn the sequence number. This is fine.
-    baseline_id = _next_baseline_id(site_dir, siteid)
-    path = site_dir / f"{baseline_id}.html"
-    
     normalized_url = normalize_url(url, preference_url=base_url)
     content_hash = sha256(normalize_html(html))
 
-    # 2. Try DB Insert
+    # 1. Check DB for EXISTING hash (Prevent Burnt IDs)
+    existing = fetch_baseline_hash(
+        site_id=siteid, 
+        normalized_url=normalized_url, 
+        base_url=base_url
+    )
+    if existing and existing.get("content_hash") == content_hash:
+        # It's a duplicate. Return None immediately to avoid burning an ID.
+        return None, None
+
+    # 2. Prepare Data (Generate ID only if unique)
+    site_dir = BASELINE_ROOT / str(custid) / str(siteid)
+    site_dir.mkdir(parents=True, exist_ok=True)
+
+    baseline_id = _next_baseline_id(site_dir, siteid)
+    path = site_dir / f"{baseline_id}.html"
+    
+    print(f"Generating baseline for {url} with ID {baseline_id}")
+
+    # 3. Try DB Insert (Should succeed since we checked, but safe to keep upsert/ignore)
     inserted = upsert_baseline_hash(
         site_id=siteid,
         normalized_url=normalized_url,
@@ -74,14 +84,13 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
     )
 
     if not inserted:
+        # Edge case: Race condition or concurrent write caught by DB
         return None, None
 
-    # 3. Write File (Only if DB accepted)
+    # 4. Write File (Only if DB accepted)
     path.write_text(html.strip(), encoding="utf-8")
 
-    # 4. Link to Defacement Site (Legacy logic, but correct for Reference)
-    # This table tracks "Seed URLs that have baselines". 
-    # If the URL is redundant, we don't add it here either.
+    # 5. Link to Defacement Site (Legacy logic, but correct for Reference)
     insert_defacement_site(
         siteid=siteid,
         baseline_id=baseline_id,

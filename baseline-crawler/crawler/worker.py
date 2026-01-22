@@ -134,6 +134,9 @@ class Worker(threading.Thread):
         # Stats
         self.saved_count = 0
         self.duplicate_count = 0
+        self.failed_count = 0
+        self.policy_skipped_count = 0
+        self.frontier_duplicate_count = 0
 
     def run(self):
         print(f"[{self.name}] started ({self.crawl_mode})")
@@ -163,6 +166,7 @@ class Worker(threading.Thread):
                             BLOCK_REPORT["FETCH_IGNORED_CONTENT_TYPE"]["urls"].append(url)
                         continue
                     print(f"[{self.name}] Fetch failed for {url}: {err}")
+                    self.failed_count += 1
                     continue
 
                 resp = result["response"]
@@ -182,8 +186,20 @@ class Worker(threading.Thread):
                     "fetched_at": fetched_at,
                     "base_url": self.seed_url, # Pass preference
                 })
-                if db_action:
-                    print(f"[{self.name}] DB: {db_action} crawl_pages for {url}")
+
+                if db_action == "Inserted":
+                    # Only increment saved_count if it's a genuine NEW insertion
+                    if self.crawl_mode in ("CRAWL", "BASELINE"):
+                        self.saved_count += 1
+                    print(f"[{self.name}] DB: Inserted crawl_pages for {url}")
+                elif db_action == "Updated":
+                    # Canonical duplicate (e.g. http vs https pair)
+                    self.duplicate_count += 1
+                    print(f"[{self.name}] DB: Updated crawl_pages for {url}")
+                else:
+                    # Root URL skipped by policy in insert_crawl_page
+                    self.policy_skipped_count += 1
+                    print(f"[{self.name}] DB: Skipped crawl_pages for {url} (policy)")
 
                 if "text/html" not in ct.lower():
                     continue
@@ -227,11 +243,14 @@ class Worker(threading.Thread):
                     )
 
                     if baseline_id:
-                        self.saved_count += 1
-                        print(f"[{self.name}] DB: Saved baseline hash for {url}")
+                        # Baseline pages are a separate count. 
+                        # We don't increment saved_count here to avoid double-counting crawl_pages
+                        print(f"[{self.name}] DB: Saved baseline hash for {url} with ID {baseline_id}")
                     else:
-                        self.duplicate_count += 1
-                        print(f"[{self.name}] DB: Duplicate URL skipped for {url}")
+                        # If a baseline is duplicate but the SITE fetch was new (CRAWL_PAGES Inserted),
+                        # we still treat it as successful for stats. 
+                        # duplicate_count is already handled by insert_crawl_page logic above.
+                        print(f"[{self.name}] DB: Duplicate baseline URL skipped for {url}")
 
 
                 elif self.crawl_mode == "COMPARE":
@@ -241,6 +260,9 @@ class Worker(threading.Thread):
                         html=html,
                         base_url=self.seed_url,
                     )
+                
+                else: # CRAWL mode
+                    pass # Handled by insert_crawl_page logic above
 
                 # ---------------- ENQUEUE ----------------
                 enqueued_count = 0
@@ -262,8 +284,10 @@ class Worker(threading.Thread):
                         blocked_domain_count += 1
                         continue
 
-                    self.frontier.enqueue(u, url, depth + 1, preference_url=self.seed_url)
-                    enqueued_count += 1
+                    if self.frontier.enqueue(u, url, depth + 1, preference_url=self.seed_url):
+                        enqueued_count += 1
+                    else:
+                        self.frontier_duplicate_count += 1
 
                 if enqueued_count > 0:
                     print(f"[{self.name}] Enqueued {enqueued_count} URLs")

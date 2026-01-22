@@ -108,6 +108,10 @@ def main():
 
 
         job_id = str(uuid.uuid4())
+        
+        # Reset global block report for this site
+        from crawler.worker import BLOCK_REPORT
+        BLOCK_REPORT.clear()
 
         print("\n" + "=" * 60)
         print(f"Starting crawl job {job_id}")
@@ -171,12 +175,28 @@ def main():
             print(f"Customer ID       : {custid}")
             print(f"Site ID           : {siteid}")
             print(f"Seed URL          : {start_url}")
+            
             total_saved = sum(w.saved_count for w in workers)
-            total_duplicates = sum(w.duplicate_count for w in workers)
+            total_db_updates = sum(w.duplicate_count for w in workers)
+            total_failed = sum(w.failed_count for w in workers)
+            total_policy_skipped = sum(w.policy_skipped_count for w in workers)
+            total_frontier_skips = sum(w.frontier_duplicate_count for w in workers)
+            total_blocked = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in BLOCK_REPORT.values())
+            
+            # Total Duplicates = DB Updates + Frontier Skips
+            total_duplicates = total_db_updates + total_frontier_skips
+            
+            # Total Visited = Crawled + Duplicates + Blocked + Failed + Policy Skips
+            total_visited = total_saved + total_duplicates + total_blocked + total_failed + total_policy_skipped
 
-            print(f"Total URLs visited: {stats['visited_count']}")
-            print(f"Unique Pages Saved: {total_saved}")
+            print(f"Total URLs Crawled: {total_saved}")
+            print(f"Total URLs Visited: {total_visited}")
             print(f"Duplicates Skipped: {total_duplicates}")
+            print(f" (Frontier Skips) : {total_frontier_skips}")
+            print(f" (DB Updates)     : {total_db_updates}")
+            print(f"Policy Skipped    : {total_policy_skipped}")
+            print(f"URLs Blocked      : {total_blocked}")
+            print(f"URLs Failed       : {total_failed}")
             print(f"Crawl duration    : {duration:.2f} seconds")
             print(f"Workers used      : {len(workers)}")
             print("-" * 60)
