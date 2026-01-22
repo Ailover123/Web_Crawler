@@ -4,27 +4,23 @@ from crawler.storage.mysql import get_connection
 from crawler.storage.db_guard import DB_SEMAPHORE
 
 
-def get_baseline_hash(*, site_id: int, normalized_url: str):
+from crawler.normalizer import get_canonical_id
+
+def get_baseline_hash(*, site_id: int, normalized_url: str, base_url: str | None = None):
     """
     Fetch baseline row for a given page.
-
-    Returns:
-        {
-            "id": <baseline_id>,
-            "content_hash": <sha256>
-        }
-        or None
     """
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
+        canonical_url = get_canonical_id(normalized_url, base_url)
         cur.execute(
             """
             SELECT id, content_hash
             FROM baseline_pages
             WHERE site_id=%s AND normalized_url=%s
             """,
-            (site_id, normalized_url),
+            (site_id, canonical_url),
         )
         return cur.fetchone()
     finally:

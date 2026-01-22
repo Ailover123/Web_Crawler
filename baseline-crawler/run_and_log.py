@@ -7,6 +7,7 @@ import subprocess
 import sys
 import os
 import time
+import datetime
 
 def main():
     # Ensure we're in the directory of this script
@@ -14,8 +15,19 @@ def main():
     if os.getcwd() != script_dir:
         os.chdir(script_dir)
 
+    # Create logs directory if it doesn't exist
+    log_dir = os.path.join(script_dir, '..', 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Generate timestamped log filename
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    log_filename = f"{timestamp}_IST.txt"
+    log_path = os.path.join(log_dir, log_filename)
+    
+    print(f"Logging output to: {log_path}")
+
     # Run main.py and capture all output in real-time
-    with open('crawl_output.txt', 'w') as f:
+    with open(log_path, 'w', encoding='utf-8') as f:
         process = subprocess.Popen([sys.executable, 'main.py'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         while True:
             output = process.stdout.readline()
@@ -27,7 +39,7 @@ def main():
                 f.flush()  # Ensure it's written immediately
         rc = process.poll()
 
-    print("\nCrawl completed. Output saved to crawl_output.txt")
+    print(f"\nCrawl completed. Output saved to {log_path}")
 
 if __name__ == "__main__":
     main()
