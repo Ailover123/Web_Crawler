@@ -20,9 +20,9 @@ from crawler.storage.baseline_store import (
 from crawler.compare_engine import CompareEngine
 
 from crawler.js_detect import needs_js_rendering
-
 from crawler.render_cache import get_cached_render, set_cached_render
 from crawler.js_render_worker import JSRenderWorker
+
 JS_RENDERER = JSRenderWorker()
 
 
@@ -55,11 +55,9 @@ BLOCK_LOCK = threading.Lock()
 def classify_block(url: str):
     parsed = urlparse(url)
 
-    # Block static file extensions first
     if parsed.path.endswith(STATIC_EXTENSIONS):
         return "STATIC"
 
-    # Block blog pages with query parameters like "?e-page-765f5351=12"
     if parsed.query:
         if re.search(r'(^|&)(e-page-[0-9a-fA-F]+)=', parsed.query):
             return "BLOG_EPAGE"
@@ -97,6 +95,7 @@ class Worker(threading.Thread):
         job_id,
         crawl_mode,
         seed_url,
+        original_site_url=None,   # ✅ DB identity
     ):
         super().__init__(name=name)
         self.frontier = frontier
@@ -106,12 +105,48 @@ class Worker(threading.Thread):
         self.job_id = job_id
         self.crawl_mode = crawl_mode
         self.seed_url = seed_url
+        self.original_site_url = original_site_url
 
         self.compare_engine = (
             CompareEngine(custid=self.custid)
             if crawl_mode == "COMPARE"
             else None
         )
+
+    # --------------------------------------------------
+    # DB URL IDENTITY FIX
+    # --------------------------------------------------
+    def _db_url(self, fetched_url: str) -> str:
+        """
+        Store URLs WITHOUT scheme.
+        Preserve www only if original site URL had it.
+        """
+        try:
+            parsed = urlparse(fetched_url)
+
+            host = parsed.netloc.lower()
+
+            # Decide whether www should be kept
+            keep_www = False
+            if self.original_site_url:
+                keep_www = urlparse(
+                    normalize_url(self.original_site_url)
+                ).netloc.lower().startswith("www.")
+
+            # Remove www if original site didn't have it
+            if host.startswith("www.") and not keep_www:
+                host = host[4:]
+
+            # Rebuild URL WITHOUT scheme
+            path = parsed.path or ""
+            query = f"?{parsed.query}" if parsed.query else ""
+
+            return f"{host}{path}{query}"
+
+        except Exception:
+            # absolute fallback
+            return fetched_url
+
 
     def run(self):
         print(f"[{self.name}] started ({self.crawl_mode})")
@@ -134,7 +169,6 @@ class Worker(threading.Thread):
 
                 if not result["success"]:
                     err = result.get("error", "unknown")
-                    # Suppress noisy messages for ignored content types (e.g., images)
                     if isinstance(err, str) and "ignored content type" in err:
                         with BLOCK_LOCK:
                             BLOCK_REPORT["FETCH_IGNORED_CONTENT_TYPE"]["count"] += 1
@@ -146,12 +180,13 @@ class Worker(threading.Thread):
                 resp = result["response"]
                 ct = resp.headers.get("Content-Type", "")
 
+                # ✅ STORE DB URL CORRECTLY
                 insert_crawl_page({
                     "job_id": self.job_id,
                     "custid": self.custid,
                     "siteid": self.siteid,
-                    "url": url,
-                    "parent_url": parent,
+                    "url": self._db_url(url),
+                    "parent_url": self._db_url(parent) if parent else None,
                     "depth": depth,
                     "status_code": resp.status_code,
                     "content_type": ct,
@@ -163,14 +198,11 @@ class Worker(threading.Thread):
                 if "text/html" not in ct.lower():
                     continue
 
-                # ---------------- HTML HANDLING ----------------
                 html = resp.text
 
-                # 🔒 ALWAYS ensure final HTML before extracting URLs
                 urls, _ = extract_urls(html, url)
 
                 if not urls and needs_js_rendering(html):
-
                     cached = get_cached_render(url)
                     if cached:
                         html = cached
@@ -179,23 +211,13 @@ class Worker(threading.Thread):
                         html = JS_RENDERER.render(url)
                         set_cached_render(url, html)
 
-
-                # 🔒 Extract URLs ONLY after JS handling
                 urls, _ = extract_urls(html, url)
 
-                if not urls:
-                    print(f"[{self.name}] ⚠️  No URLs extracted from {url}")
-                    print(f"[{self.name}]    HTML size: {len(html)} bytes")
-                    print(f"[{self.name}]    Possible cause: JS-rendered content or minimal links")
-                else:
-                    print(f"[{self.name}] Extracted {len(urls)} URLs from {url}")
-
-                # ---------------- MODE LOGIC ----------------
                 if self.crawl_mode == "BASELINE":
                     baseline_id, _, path = store_snapshot_file(
                         custid=self.custid,
                         siteid=self.siteid,
-                        url=url,
+                        url=self._db_url(url),
                         html=html,
                         crawl_mode="BASELINE",
                     )
@@ -214,45 +236,31 @@ class Worker(threading.Thread):
                         html=html,
                     )
 
-                # ---------------- ENQUEUE ----------------
-                enqueued_count = 0
-                blocked_rule_count = 0
-                blocked_domain_count = 0
+                enqueued = 0
                 for u in urls:
                     block_type = classify_block(u)
                     if block_type:
                         with BLOCK_LOCK:
                             BLOCK_REPORT[block_type]["count"] += 1
                             BLOCK_REPORT[block_type]["urls"].append(u)
-                        blocked_rule_count += 1
                         continue
 
                     if not _allowed_domain(self.seed_url, u):
                         with BLOCK_LOCK:
                             BLOCK_REPORT["DOMAIN_FILTER"]["count"] += 1
                             BLOCK_REPORT["DOMAIN_FILTER"]["urls"].append(u)
-                        blocked_domain_count += 1
                         continue
 
                     self.frontier.enqueue(u, url, depth + 1)
-                    enqueued_count += 1
+                    enqueued += 1
 
-                if enqueued_count > 0:
-                    print(f"[{self.name}] Enqueued {enqueued_count} URLs")
-
-                # Print a concise summary of blocked URLs instead of every single one
-                if blocked_rule_count or blocked_domain_count:
-                    parts = []
-                    if blocked_rule_count:
-                        parts.append(f"{blocked_rule_count} blocked by rule")
-                    if blocked_domain_count:
-                        parts.append(f"{blocked_domain_count} blocked by domain")
-                    print(f"[{self.name}] Blocked: {'; '.join(parts)}")
+                if enqueued:
+                    print(f"[{self.name}] Enqueued {enqueued} URLs")
 
             except Exception as e:
                 import traceback
                 print(f"[{self.name}] ERROR {url}: {e}")
-                print(f"[{self.name}] Traceback: {traceback.format_exc()}")
+                print(traceback.format_exc())
 
             finally:
                 self.frontier.mark_visited(url, got_task=got_task)

@@ -4,7 +4,6 @@ Entry point for the web crawler.
 Uses queue.join() for deterministic crawl completion.
 """
 
-import site
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -25,7 +24,6 @@ from crawler.storage.db import (
 )
 
 from crawler.worker import BLOCK_REPORT
-#from crawler.compare_engine import DEFACEMENT_REPORT
 
 CRAWL_MODE = os.getenv("CRAWL_MODE", "CRAWL").upper()
 assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE")
@@ -36,41 +34,37 @@ SCALE_THRESHOLD = 100
 
 
 # ============================================================
-# SEED URL RESOLUTION (CRITICAL FIX)
+# SEED URL RESOLUTION (FOR FETCHING ONLY)
 # ============================================================
 
 def resolve_seed_url(raw_url: str) -> str:
     """
-    Resolve the correct root URL for crawling.
-
-    Tries:
-      1) without trailing slash
-      2) with trailing slash
-
-    Locks the first variant that responds successfully.
+    Resolve a working URL for crawling.
+    This does NOT change DB identity.
     """
     raw = raw_url.strip()
 
-    if raw.endswith("/"):
-        candidates = [raw.rstrip("/"), raw]
-    else:
-        candidates = [raw, raw + "/"]
+    # Try without / and with /
+    candidates = (
+        [raw.rstrip("/"), raw]
+        if raw.endswith("/")
+        else [raw, raw + "/"]
+    )
 
     for u in candidates:
         try:
             r = requests.get(
-                u,
+                u if u.startswith(("http://", "https://")) else "https://" + u,
                 timeout=8,
                 allow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             if r.status_code < 400:
-                # lock final resolved URL
                 return r.url
         except Exception:
             continue
 
-    # fallback: ensure scheme is present
+    # Last-resort fallback
     if not raw.startswith(("http://", "https://")):
         raw = "https://" + raw
     return raw
@@ -100,12 +94,12 @@ def main():
         siteid = site["siteid"]
         custid = site["custid"]
 
-        # 🔑 Resolve seed FIRST, normalize AFTER
-        from crawler.url_utils import canonicalize_seed
+        # 🔒 EXACT value from sites table (DB identity)
+        original_site_url = site["url"].strip()
 
-        resolved_seed = resolve_seed_url(site["url"])
-        start_url = canonicalize_seed(resolved_seed)
-
+        # 🌐 Resolve + normalize ONLY for crawling
+        resolved_seed = resolve_seed_url(original_site_url)
+        start_url = normalize_url(resolved_seed)
 
         job_id = str(uuid.uuid4())
 
@@ -114,6 +108,7 @@ def main():
         print(f"Customer ID : {custid}")
         print(f"Site ID     : {siteid}")
         print(f"Seed URL    : {start_url}")
+        print(f"DB URL      : {original_site_url}")
         print("=" * 60)
 
         try:
@@ -121,7 +116,7 @@ def main():
                 job_id=job_id,
                 custid=custid,
                 siteid=siteid,
-                start_url=start_url,
+                start_url=original_site_url,  # ✅ store EXACT value
             )
 
             frontier = Frontier()
@@ -140,7 +135,8 @@ def main():
                     siteid_map=siteid_map,
                     job_id=job_id,
                     crawl_mode=CRAWL_MODE,
-                    seed_url=start_url,   # 🔒 SINGLE SOURCE OF TRUTH
+                    seed_url=start_url,                 # crawl truth
+                    original_site_url=original_site_url,  # DB truth
                 )
                 w.start()
                 workers.append(w)
@@ -170,7 +166,8 @@ def main():
             print(f"Job ID            : {job_id}")
             print(f"Customer ID       : {custid}")
             print(f"Site ID           : {siteid}")
-            print(f"Seed URL          : {start_url}")
+            print(f"Seed URL (crawl)  : {start_url}")
+            print(f"URL (DB)          : {original_site_url}")
             print(f"Total URLs visited: {stats['visited_count']}")
             print(f"Crawl duration    : {duration:.2f} seconds")
             print(f"Workers used      : {len(workers)}")
@@ -196,24 +193,14 @@ if __name__ == "__main__":
         print("BLOCKED URL REPORT")
         print("=" * 60)
         for block_type, data in BLOCK_REPORT.items():
-            # New format: dict with 'count' and 'urls'; keep backward compatibility
-            if isinstance(data, dict) and "count" in data:
-                count = data.get("count", 0)
-                urls = data.get("urls", [])
-            elif isinstance(data, int):
-                count = data
+            try:
+                count = len(data)
+                urls = list(data)
+            except Exception:
+                count = 0
                 urls = []
-            else:
-                # fallback for list-like
-                try:
-                    count = len(data)
-                except Exception:
-                    count = 0
-                urls = list(data) if hasattr(data, '__iter__') else []
 
             print(f"[{block_type}] {count} URLs blocked")
-            if urls:
-                for u in urls:
-                    print(f"  - {u}")
-        print("=" * 60)
+            for u in urls:
+                print(f"  - {u}")
         print("=" * 60)
