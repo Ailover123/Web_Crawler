@@ -28,12 +28,15 @@ def main():
 
     # Run main.py and capture all output in real-time
     with open(log_path, 'w', encoding='utf-8') as f:
-        process = subprocess.Popen([sys.executable, 'main.py'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        # Use a more robust way to read output without crashing on character encoding issues
+        process = subprocess.Popen([sys.executable, 'main.py'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         while True:
-            output = process.stdout.readline()
-            if output == '' and process.poll() is not None:
+            line_bytes = process.stdout.readline()
+            if not line_bytes and process.poll() is not None:
                 break
-            if output:
+            if line_bytes:
+                # Decode with 'replace' to handle non-UTF-8 bytes (like 0xbf) gracefully
+                output = line_bytes.decode('utf-8', errors='replace')
                 print(output.strip())  # Print to terminal
                 f.write(output)  # Write to file
                 f.flush()  # Ensure it's written immediately

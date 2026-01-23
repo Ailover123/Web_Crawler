@@ -54,8 +54,15 @@ def normalize_url(url: str, *, base: str | None = None, preference_url: str | No
         if base_netloc == base_pref:
             netloc = p_netloc # Force exact match to preference
 
-    # Standardize: Strip trailing slash to avoid duplicate fetches
-    path = (parsed.path or "/").rstrip("/")
+    # Standardize path
+    path = parsed.path if parsed.path else "/"
+    
+    # Remove multiple consecutive slashes (e.g. // -> /)
+    while '//' in path:
+        path = path.replace('//', '/')
+        
+    # Strip trailing slash to avoid duplicate fetches
+    path = path.rstrip("/")
     if not path:
         path = "/"
         

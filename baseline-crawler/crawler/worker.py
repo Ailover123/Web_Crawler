@@ -44,7 +44,9 @@ QUERY_BLOCK_RULES = {
 STATIC_EXTENSIONS = (
     ".css", ".js", ".png", ".jpg", ".jpeg", ".webp",
     ".gif", ".svg", ".ico", ".woff", ".woff2",
-    ".ttf", ".eot", ".pdf", ".zip"
+    ".ttf", ".eot", ".pdf", ".zip", ".xlsx",
+    ".xls", ".docx", ".doc", ".gz", ".tar",
+    ".ppt", ".pptx"
 )
 
 BLOCK_REPORT = defaultdict(lambda: {"count": 0, "urls": []})
@@ -138,6 +140,15 @@ class Worker(threading.Thread):
         self.policy_skipped_count = 0
         self.frontier_duplicate_count = 0
 
+    def is_soft_redirect(self, html: str) -> bool:
+        """
+        Heuristic to detect soft redirects (Meta-refresh or JS window.location).
+        """
+        if not html:
+            return False
+        h = html.lower()
+        return 'http-equiv="refresh"' in h or 'window.location' in h
+
     def run(self):
         print(f"[{self.name}] started ({self.crawl_mode})")
 
@@ -165,18 +176,41 @@ class Worker(threading.Thread):
                             BLOCK_REPORT["FETCH_IGNORED_CONTENT_TYPE"]["count"] += 1
                             BLOCK_REPORT["FETCH_IGNORED_CONTENT_TYPE"]["urls"].append(url)
                         continue
-                    print(f"[{self.name}] Fetch failed for {url}: {err}")
-                    self.failed_count += 1
-                    continue
+
+                    # SPECIAL CASE: 404 with Meta-refresh or JS Redirect (Soft Redirect)
+                    if "http error: 404" in str(err) and "html" in result:
+                        if self.is_soft_redirect(result["html"]):
+                            final_html, final_url = JS_RENDERER.render(url)
+                            
+                            if final_url and final_url != url:
+                                print(f"[{self.name}] Soft Redirect detected on 404 for {url} -> Redirected to {final_url} (Recovered)")
+                                result["success"] = True
+                                result["response"] = type('obj', (object,), {'status_code': 200, 'headers': {'Content-Type': 'text/html'}, 'text': final_html, 'content': final_html.encode()})
+                                result["final_url"] = final_url
+                                ct = "text/html"
+                            else:
+                                print(f"[{self.name}] Soft Redirect failed for {url} (Still 404 / No redirect after waiting)")
+                                if final_html:
+                                    result["html"] = final_html
+
+                    if not result["success"]:
+                        print(f"[{self.name}] Fetch failed for {url}: {err}")
+                        self.failed_count += 1
+                        continue
 
                 resp = result["response"]
                 ct = resp.headers.get("Content-Type", "")
+                final_url = result.get("final_url", url)
+
+                # Log redirect if it happened
+                if final_url != url:
+                    print(f"[{self.name}] [REDIRECT] Original URL was {url} but it redirected to {final_url}")
 
                 db_action = insert_crawl_page({
                     "job_id": self.job_id,
                     "custid": self.custid,
                     "siteid": self.siteid,
-                    "url": url,
+                    "url": final_url, # 🔒 Use final destination URL
                     "parent_url": parent,
                     "depth": depth,
                     "status_code": resp.status_code,
@@ -191,11 +225,11 @@ class Worker(threading.Thread):
                     # Only increment saved_count if it's a genuine NEW insertion
                     if self.crawl_mode in ("CRAWL", "BASELINE"):
                         self.saved_count += 1
-                    print(f"[{self.name}] DB: Inserted crawl_pages for {url}")
+                    print(f"[{self.name}] DB: Inserted crawl_pages for {final_url}")
                 elif db_action == "Updated":
                     # Canonical duplicate (e.g. http vs https pair)
                     self.duplicate_count += 1
-                    print(f"[{self.name}] DB: Updated crawl_pages for {url}")
+                    print(f"[{self.name}] DB: Updated crawl_pages for {final_url}")
                 else:
                     # Root URL skipped by policy in insert_crawl_page
                     self.policy_skipped_count += 1

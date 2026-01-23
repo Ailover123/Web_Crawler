@@ -20,10 +20,17 @@ def fetch(url, discovered_from=None, depth=0):
     for attempt in range(max_retries + 1):
         start_time = time.time()
         try:
+            headers = {
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1"
+            }
             r = requests.get(
                 url,
                 timeout=REQUEST_TIMEOUT,
-                headers={"User-Agent": USER_AGENT},
+                headers=headers,
                 verify=True,
                 allow_redirects=True,
             )
@@ -43,6 +50,7 @@ def fetch(url, discovered_from=None, depth=0):
                     return {
                         "success": True,
                         "response": r,
+                        "final_url": r.url,
                         "fetch_time_ms": fetch_time_ms,
                         "response_size": response_size,
                         "content_type": content_type,
@@ -51,6 +59,7 @@ def fetch(url, discovered_from=None, depth=0):
                     return {
                         "success": False,
                         "error": f"ignored content type: {content_type}",
+                        "final_url": r.url,
                         "content_type": content_type,
                         "fetch_time_ms": fetch_time_ms,
                     }
@@ -58,8 +67,11 @@ def fetch(url, discovered_from=None, depth=0):
                 return {
                     "success": False,
                     "error": f"http error: {r.status_code}",
+                    "response": r,
+                    "final_url": r.url,
                     "content_type": content_type,
                     "fetch_time_ms": fetch_time_ms,
+                    "html": r.text if "text/html" in content_type else "",
                 }
 
         except requests.exceptions.Timeout:
