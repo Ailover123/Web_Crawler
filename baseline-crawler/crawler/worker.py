@@ -48,7 +48,7 @@ STATIC_EXTENSIONS = (
     ".gif", ".svg", ".ico", ".woff", ".woff2",
     ".ttf", ".eot", ".pdf", ".zip", ".xlsx",
     ".xls", ".docx", ".doc", ".gz", ".tar",
-    ".ppt", ".pptx"
+    ".ppt", ".pptx", ".mp3"
 )
 
 BLOCK_REPORT = defaultdict(lambda: {"count": 0, "urls": []})
