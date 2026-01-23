@@ -7,6 +7,7 @@ NO database writes happen here.
 import requests
 import time
 from crawler.config import USER_AGENT, REQUEST_TIMEOUT
+from crawler.logger import logger
 
 
 def fetch(url, discovered_from=None, depth=0):
@@ -40,7 +41,7 @@ def fetch(url, discovered_from=None, depth=0):
             content_type = r.headers.get("Content-Type", "").lower()
 
             if r.status_code == 429 and attempt < max_retries:
-                print(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Waiting {retry_delay}s...")
+                logger.warning(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Waiting {retry_delay}s...")
                 time.sleep(retry_delay)
                 retry_delay *= 2
                 continue

@@ -1,4 +1,4 @@
-# crawler/worker.py
+import logging
 import threading
 import time
 import re
@@ -17,6 +17,8 @@ from crawler.storage.baseline_store import (
     save_baseline_if_unique,
 )
 from crawler.compare_engine import CompareEngine
+
+from crawler.logger import logger
 
 from crawler.js_detect import needs_js_rendering
 
@@ -140,6 +142,21 @@ class Worker(threading.Thread):
         self.policy_skipped_count = 0
         self.frontier_duplicate_count = 0
 
+    def _log(self, level, msg, *args, **kwargs):
+        """Helper to log with worker names as context."""
+        kwargs.setdefault('extra', {})
+        kwargs['extra']['context'] = self.name
+        logger.log(level, msg, *args, **kwargs)
+
+    def info(self, msg, *args, **kwargs):
+        self._log(logging.INFO, msg, *args, **kwargs)
+
+    def error(self, msg, *args, **kwargs):
+        self._log(logging.ERROR, msg, *args, **kwargs)
+
+    def warning(self, msg, *args, **kwargs):
+        self._log(logging.WARNING, msg, *args, **kwargs)
+
     def is_soft_redirect(self, html: str) -> bool:
         """
         Heuristic to detect soft redirects (Meta-refresh or JS window.location).
@@ -150,7 +167,7 @@ class Worker(threading.Thread):
         return 'http-equiv="refresh"' in h or 'window.location' in h
 
     def run(self):
-        print(f"[{self.name}] started ({self.crawl_mode})")
+        self.info(f"started ({self.crawl_mode})")
 
         while self.running:
             (item, got_task) = self.frontier.dequeue()
@@ -163,7 +180,7 @@ class Worker(threading.Thread):
             start = time.time()
 
             try:
-                print(f"[{self.name}] Crawling {url}")
+                self.info(f"Crawling {url}")
 
                 result = fetch(url, parent, depth)
                 fetched_at = datetime.now(timezone.utc)
@@ -183,18 +200,18 @@ class Worker(threading.Thread):
                             final_html, final_url = JS_RENDERER.render(url)
                             
                             if final_url and final_url != url:
-                                print(f"[{self.name}] Soft Redirect detected on 404 for {url} -> Redirected to {final_url} (Recovered)")
+                                self.info(f"Soft Redirect detected on 404 for {url} -> Redirected to {final_url} (Recovered)")
                                 result["success"] = True
                                 result["response"] = type('obj', (object,), {'status_code': 200, 'headers': {'Content-Type': 'text/html'}, 'text': final_html, 'content': final_html.encode()})
                                 result["final_url"] = final_url
                                 ct = "text/html"
                             else:
-                                print(f"[{self.name}] Soft Redirect failed for {url} (Still 404 / No redirect after waiting)")
+                                self.info(f"Soft Redirect failed for {url} (Still 404 / No redirect after waiting)")
                                 if final_html:
                                     result["html"] = final_html
 
                     if not result["success"]:
-                        print(f"[{self.name}] Fetch failed for {url}: {err}")
+                        self.error(f"Fetch failed for {url}: {err}")
                         self.failed_count += 1
                         continue
 
@@ -204,7 +221,7 @@ class Worker(threading.Thread):
 
                 # Log redirect if it happened
                 if final_url != url:
-                    print(f"[{self.name}] [REDIRECT] Original URL was {url} but it redirected to {final_url}")
+                    self.info(f"[REDIRECT] Original URL was {url} but it redirected to {final_url}")
 
                 db_action = insert_crawl_page({
                     "job_id": self.job_id,
@@ -225,15 +242,15 @@ class Worker(threading.Thread):
                     # Only increment saved_count if it's a genuine NEW insertion
                     if self.crawl_mode in ("CRAWL", "BASELINE"):
                         self.saved_count += 1
-                    print(f"[{self.name}] DB: Inserted crawl_pages for {final_url}")
+                    self.info(f"DB: Inserted crawl_pages for {final_url}")
                 elif db_action == "Updated":
                     # Canonical duplicate (e.g. http vs https pair)
                     self.duplicate_count += 1
-                    print(f"[{self.name}] DB: Updated crawl_pages for {final_url}")
+                    self.info(f"DB: Updated crawl_pages for {final_url}")
                 else:
                     # Root URL skipped by policy in insert_crawl_page
                     self.policy_skipped_count += 1
-                    print(f"[{self.name}] DB: Skipped crawl_pages for {url} (policy)")
+                    self.info(f"DB: Skipped crawl_pages for {url} (policy)")
 
                 if "text/html" not in ct.lower():
                     continue
@@ -250,7 +267,7 @@ class Worker(threading.Thread):
                     if cached:
                         html = cached
                     else:
-                        print(f"[{self.name}] JS rendering {url}")
+                        self.info(f"JS rendering {url}")
                         html = JS_RENDERER.render(url)
                         set_cached_render(url, html)
 
@@ -259,11 +276,11 @@ class Worker(threading.Thread):
                 urls, _ = extract_urls(html, url)
 
                 if not urls:
-                    print(f"[{self.name}] [WARN] No URLs extracted from {url}")
-                    print(f"[{self.name}]    HTML size: {len(html)} bytes")
-                    print(f"[{self.name}]    Possible cause: JS-rendered content or minimal links")
+                    self.warning(f"[WARN] No URLs extracted from {url}")
+                    self.warning(f"   HTML size: {len(html)} bytes")
+                    self.warning(f"   Possible cause: JS-rendered content or minimal links")
                 else:
-                    print(f"[{self.name}] Extracted {len(urls)} URLs from {url}")
+                    self.info(f"Extracted {len(urls)} URLs from {url}")
 
                 # ---------------- MODE LOGIC ----------------
                 # ---------------- MODE LOGIC ----------------
@@ -279,12 +296,12 @@ class Worker(threading.Thread):
                     if baseline_id:
                         # Baseline pages are a separate count. 
                         # We don't increment saved_count here to avoid double-counting crawl_pages
-                        print(f"[{self.name}] DB: Saved baseline hash for {url} with ID {baseline_id}")
+                        self.info(f"DB: Saved baseline hash for {url} with ID {baseline_id}")
                     else:
                         # If a baseline is duplicate but the SITE fetch was new (CRAWL_PAGES Inserted),
                         # we still treat it as successful for stats. 
                         # duplicate_count is already handled by insert_crawl_page logic above.
-                        print(f"[{self.name}] DB: Duplicate baseline URL skipped for {url}")
+                        self.info(f"DB: Duplicate baseline URL skipped for {url}")
 
 
                 elif self.crawl_mode == "COMPARE":
@@ -324,7 +341,7 @@ class Worker(threading.Thread):
                         self.frontier_duplicate_count += 1
 
                 if enqueued_count > 0:
-                    print(f"[{self.name}] Enqueued {enqueued_count} URLs")
+                    self.info(f"Enqueued {enqueued_count} URLs")
 
                 # Print a concise summary of blocked URLs instead of every single one
                 if blocked_rule_count or blocked_domain_count:
@@ -333,12 +350,12 @@ class Worker(threading.Thread):
                         parts.append(f"{blocked_rule_count} blocked by rule")
                     if blocked_domain_count:
                         parts.append(f"{blocked_domain_count} blocked by domain")
-                    print(f"[{self.name}] Blocked: {'; '.join(parts)}")
+                    self.info(f"Blocked: {'; '.join(parts)}")
 
             except Exception as e:
                 import traceback
-                print(f"[{self.name}] ERROR {url}: {e}")
-                print(f"[{self.name}] Traceback: {traceback.format_exc()}")
+                self.error(f"ERROR {url}: {e}")
+                self.error(f"Traceback: {traceback.format_exc()}")
 
             finally:
                 self.frontier.mark_visited(url, got_task=got_task, preference_url=self.seed_url)

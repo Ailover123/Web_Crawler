@@ -24,6 +24,8 @@ from crawler.storage.db import (
     fail_crawl_job,
 )
 
+from crawler.logger import logger
+
 from crawler.worker import BLOCK_REPORT
 #from crawler.compare_engine import DEFACEMENT_REPORT
 
@@ -83,17 +85,17 @@ def resolve_seed_url(raw_url: str) -> str:
 def main():
     # ---------------- DB CHECK ----------------
     if not check_db_health():
-        print("ERROR: MySQL health check failed.")
+        logger.error("MySQL health check failed.")
         return
 
-    print("MySQL health check passed.")
+    logger.info("MySQL health check passed.")
 
     sites = fetch_enabled_sites()
     if not sites:
-        print("No enabled sites found.")
+        logger.info("No enabled sites found.")
         return
 
-    print(f"Found {len(sites)} enabled site(s).")
+    logger.info(f"Found {len(sites)} enabled site(s).")
 
     # ---------------- PER SITE ----------------
     for site in sites:
@@ -113,12 +115,12 @@ def main():
         from crawler.worker import BLOCK_REPORT
         BLOCK_REPORT.clear()
 
-        print("\n" + "=" * 60)
-        print(f"Starting crawl job {job_id}")
-        print(f"Customer ID : {custid}")
-        print(f"Site ID     : {siteid}")
-        print(f"Seed URL    : {start_url}")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info(f"Starting crawl job {job_id}")
+        logger.info(f"Customer ID : {custid}")
+        logger.info(f"Site ID     : {siteid}")
+        logger.info(f"Seed URL    : {start_url}")
+        logger.info("=" * 60)
 
         try:
             insert_crawl_job(
@@ -149,7 +151,7 @@ def main():
                 w.start()
                 workers.append(w)
 
-            print(f"Started {len(workers)} workers.")
+            logger.info(f"Started {len(workers)} workers.")
 
             # 🔒 Deterministic completion
             frontier.queue.join()
@@ -168,13 +170,13 @@ def main():
                 pages_crawled=stats["visited_count"],
             )
 
-            print("\n" + "-" * 60)
-            print("CRAWL COMPLETED")
-            print("-" * 60)
-            print(f"Job ID            : {job_id}")
-            print(f"Customer ID       : {custid}")
-            print(f"Site ID           : {siteid}")
-            print(f"Seed URL          : {start_url}")
+            logger.info("-" * 60)
+            logger.info("CRAWL COMPLETED")
+            logger.info("-" * 60)
+            logger.info(f"Job ID            : {job_id}")
+            logger.info(f"Customer ID       : {custid}")
+            logger.info(f"Site ID           : {siteid}")
+            logger.info(f"Seed URL          : {start_url}")
             
             total_saved = sum(w.saved_count for w in workers)
             total_db_updates = sum(w.duplicate_count for w in workers)
@@ -189,24 +191,24 @@ def main():
             # Total Visited = Crawled + Duplicates + Blocked + Failed + Policy Skips
             total_visited = total_saved + total_duplicates + total_blocked + total_failed + total_policy_skipped
 
-            print(f"Total URLs Crawled: {total_saved}")
-            print(f"Total URLs Visited: {total_visited}")
-            print(f"Duplicates Skipped: {total_duplicates}")
-            print(f" (Frontier Skips) : {total_frontier_skips}")
-            print(f" (DB Updates)     : {total_db_updates}")
-            print(f"Policy Skipped    : {total_policy_skipped}")
-            print(f"URLs Blocked      : {total_blocked}")
-            print(f"URLs Failed       : {total_failed}")
-            print(f"Crawl duration    : {duration:.2f} seconds")
-            print(f"Workers used      : {len(workers)}")
-            print("-" * 60)
+            logger.info(f"Total URLs Crawled: {total_saved}")
+            logger.info(f"Total URLs Visited: {total_visited}")
+            logger.info(f"Duplicates Skipped: {total_duplicates}")
+            logger.info(f" (Frontier Skips) : {total_frontier_skips}")
+            logger.info(f" (DB Updates)     : {total_db_updates}")
+            logger.info(f"Policy Skipped    : {total_policy_skipped}")
+            logger.info(f"URLs Blocked      : {total_blocked}")
+            logger.info(f"URLs Failed       : {total_failed}")
+            logger.info(f"Crawl duration    : {duration:.2f} seconds")
+            logger.info(f"Workers used      : {len(workers)}")
+            logger.info("-" * 60)
 
         except Exception as e:
             fail_crawl_job(job_id, str(e))
-            print(f"ERROR: Crawl job {job_id} failed: {e}")
+            logger.error(f"Crawl job {job_id} failed: {e}")
             raise
 
-    print("\nAll site crawls completed successfully.")
+    logger.info("All site crawls completed successfully.")
 
 
 # ============================================================
@@ -217,9 +219,9 @@ if __name__ == "__main__":
     main()
 
     if BLOCK_REPORT:
-        print("\n" + "=" * 60)
-        print("BLOCKED URL REPORT")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("BLOCKED URL REPORT")
+        logger.info("=" * 60)
         for block_type, data in BLOCK_REPORT.items():
             # New format: dict with 'count' and 'urls'; keep backward compatibility
             if isinstance(data, dict) and "count" in data:
@@ -236,9 +238,9 @@ if __name__ == "__main__":
                     count = 0
                 urls = list(data) if hasattr(data, '__iter__') else []
 
-            print(f"[{block_type}] {count} URLs blocked")
+            logger.info(f"[{block_type}] {count} URLs blocked")
             if urls:
                 for u in urls:
-                    print(f"  - {u}")
-        print("=" * 60)
-        print("=" * 60)
+                    logger.info(f"  - {u}")
+        logger.info("=" * 60)
+        logger.info("=" * 60)
