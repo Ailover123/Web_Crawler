@@ -57,13 +57,15 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
 
     # 1. Check DB for EXISTING hash (Prevent Burnt IDs)
     existing = fetch_baseline_hash(
-        site_id=siteid, 
-        normalized_url=normalized_url, 
-        base_url=base_url
-    )
-    if existing and existing.get("content_hash") == content_hash:
-        # It's a duplicate. Return None immediately to avoid burning an ID.
-        return None, None
+    site_id=siteid,
+    normalized_url=normalized_url,
+    base_url=base_url
+)
+
+# If ANY baseline exists for this URL → skip
+    if existing:
+     return None, None
+
 
     # 2. Prepare Data (Generate ID only if unique)
     site_dir = BASELINE_ROOT / str(custid) / str(siteid)
