@@ -22,6 +22,7 @@ from crawler.storage.db import (
     complete_crawl_job,
     fail_crawl_job,
 )
+from crawler.baseline_worker import BaselineWorker
 
 from crawler.worker import BLOCK_REPORT
 
@@ -116,15 +117,49 @@ def main():
                 job_id=job_id,
                 custid=custid,
                 siteid=siteid,
-                start_url=original_site_url,  # ✅ store EXACT value
+                start_url=original_site_url,
             )
+
+            start_time = time.time()
+
+            # ====================================================
+            # BASELINE MODE (NO CRAWLING, NO WORKERS)
+            # ====================================================
+            if CRAWL_MODE == "BASELINE":
+                print("[MODE] BASELINE (offline, DB-driven)")
+
+                BaselineWorker(
+                    custid=custid,
+                    siteid=siteid,
+                    seed_url=start_url,
+                ).run()
+
+                duration = time.time() - start_time
+
+                complete_crawl_job(
+                    job_id=job_id,
+                    pages_crawled=0,
+                )
+
+                print("\n" + "-" * 60)
+                print("BASELINE COMPLETED")
+                print("-" * 60)
+                print(f"Job ID        : {job_id}")
+                print(f"Customer ID   : {custid}")
+                print(f"Site ID       : {siteid}")
+                print(f"Duration      : {duration:.2f} seconds")
+                print("-" * 60)
+
+                continue  # 🔑 VERY IMPORTANT (skip crawler logic)
+
+            # ====================================================
+            # CRAWL / COMPARE MODE (UNCHANGED)
+            # ====================================================
 
             frontier = Frontier()
             frontier.enqueue(start_url, None, 0)
 
             workers = []
-            start_time = time.time()
-
             siteid_map = {siteid: siteid}
 
             for i in range(INITIAL_WORKERS):
@@ -135,18 +170,16 @@ def main():
                     siteid_map=siteid_map,
                     job_id=job_id,
                     crawl_mode=CRAWL_MODE,
-                    seed_url=start_url,                 # crawl truth
-                    original_site_url=original_site_url,  # DB truth
+                    seed_url=start_url,
+                    original_site_url=original_site_url,
                 )
                 w.start()
                 workers.append(w)
 
             print(f"Started {len(workers)} workers.")
 
-            # 🔒 Deterministic completion
             frontier.queue.join()
 
-            # ---------------- SHUTDOWN ----------------
             for w in workers:
                 w.stop()
             for w in workers:
@@ -172,13 +205,11 @@ def main():
             print(f"Crawl duration    : {duration:.2f} seconds")
             print(f"Workers used      : {len(workers)}")
             print("-" * 60)
-
         except Exception as e:
-            fail_crawl_job(job_id, str(e))
+            fail_crawl_job(job_id=job_id, err=str(e))
             print(f"ERROR: Crawl job {job_id} failed: {e}")
-            raise
-
-    print("\nAll site crawls completed successfully.")
+            import traceback
+            traceback.print_exc()
 
 
 # ============================================================

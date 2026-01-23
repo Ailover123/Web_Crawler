@@ -13,10 +13,7 @@ from crawler.normalizer import (
     normalize_url,
 )
 from crawler.storage.db import insert_crawl_page
-from crawler.storage.baseline_store import (
-    store_snapshot_file,
-    store_baseline_hash,
-)
+from crawler.storage.baseline_store import save_baseline_if_unique
 from crawler.compare_engine import CompareEngine
 
 from crawler.js_detect import needs_js_rendering
@@ -214,20 +211,19 @@ class Worker(threading.Thread):
                 urls, _ = extract_urls(html, url)
 
                 if self.crawl_mode == "BASELINE":
-                    baseline_id, _, path = store_snapshot_file(
+                    # Save baseline only if unique; DB dedup handles hash check
+                    baseline_id, path = save_baseline_if_unique(
                         custid=self.custid,
                         siteid=self.siteid,
                         url=self._db_url(url),
                         html=html,
-                        crawl_mode="BASELINE",
+                        base_url=self.seed_url,
                     )
 
-                    store_baseline_hash(
-                        site_id=self.siteid,
-                        normalized_url=normalize_url(url),
-                        raw_html=html,
-                        baseline_path=path,
-                    )
+                    if baseline_id:
+                        print(f"[{self.name}] Baseline saved id={baseline_id} path={path}")
+                    else:
+                        print(f"[{self.name}] Baseline duplicate skipped for {url}")
 
                 elif self.crawl_mode == "COMPARE":
                     self.compare_engine.handle_page(
