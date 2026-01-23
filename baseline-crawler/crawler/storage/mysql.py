@@ -134,6 +134,8 @@ def insert_crawl_page(data):
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON DUPLICATE KEY UPDATE
                 job_id=VALUES(job_id),
+                parent_url=VALUES(parent_url),
+                depth=VALUES(depth),
                 status_code=VALUES(status_code),
                 content_type=VALUES(content_type),
                 content_length=VALUES(content_length),
