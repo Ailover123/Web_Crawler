@@ -23,10 +23,7 @@ def fetch(url, discovered_from=None, depth=0):
         try:
             headers = {
                 "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1"
+                "Accept": "*/*"
             }
             r = requests.get(
                 url,

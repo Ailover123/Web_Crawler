@@ -15,7 +15,7 @@ REQUEST_TIMEOUT = 20
 
 # User-Agent string for crawler identification
 # Use a modern browser UA to reduce bot challenges
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+USER_AGENT = "Chrome/126.0.0.0"
 # Canonical data directory for the crawler. Set to the `data` folder
 # located inside the `baseline-crawler` package.
 try:
