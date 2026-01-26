@@ -119,10 +119,6 @@ def insert_crawl_page(data):
     if not canonical_url:
         return
 
-    # User Req: Skip root domain for crawl_pages table ONLY
-    if "/" not in canonical_url:
-        return
-
     conn = get_connection()
     try:
         cur = conn.cursor()

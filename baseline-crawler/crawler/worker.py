@@ -88,21 +88,35 @@ def classify_block(url: str):
 # STRICT DOMAIN FILTER
 # ==================================================
 
-def _allowed_domain(seed_url: str, candidate_url: str) -> bool:
+def _allowed_domain(seed_url: str, candidate_url: str, current_url: str = None) -> bool:
     """
     Strict domain check. Since normalize_url now handles branding preferences,
     we just need to check if the netlocs match exactly after preference-aware normalization.
+    
+    If current_url is provided, it also allows the domain of the page we are currently on
+    (handles cases where the seed redirects to a new branding domain).
     """
     from crawler.normalizer import normalize_url
     
-    # Normalize BOTH with the same seed_url as preference
+    # Normalize with seed_url preference
     s_norm = normalize_url(seed_url, preference_url=seed_url)
     c_norm = normalize_url(candidate_url, preference_url=seed_url)
     
     s_netloc = urlparse(s_norm).netloc.lower().split(":")[0]
     c_netloc = urlparse(c_norm).netloc.lower().split(":")[0]
 
-    return s_netloc == c_netloc
+    if s_netloc == c_netloc:
+        return True
+
+    # If the current page is on a different domain (allowed redirect), 
+    # allow links to that same domain.
+    if current_url:
+        curr_norm = normalize_url(current_url, preference_url=seed_url)
+        curr_netloc = urlparse(curr_norm).netloc.lower().split(":")[0]
+        if curr_netloc == c_netloc:
+            return True
+
+    return False
 
 
 # ==================================================
@@ -258,56 +272,54 @@ class Worker(threading.Thread):
                 # ---------------- HTML HANDLING ----------------
                 html = resp.text
 
-                # 🔒 ALWAYS ensure final HTML before extracting URLs
-                urls, _ = extract_urls(html, url)
+                # 🔒 Extract URLs using final destination as base
+                # This ensures relative links are joined correctly if a redirect happened.
+                urls, _ = extract_urls(html, final_url)
 
                 if not urls and needs_js_rendering(html):
 
-                    cached = get_cached_render(url)
+                    cached = get_cached_render(final_url) # Use final_url for cache
                     if cached:
                         html = cached
                     else:
-                        self.info(f"JS rendering {url}")
-                        html = JS_RENDERER.render(url)
-                        set_cached_render(url, html)
+                        self.info(f"JS rendering {final_url}")
+                        # 🔒 FIX TypeError: Unpack tuple (html, rendered_url)
+                        html, rendered_url = JS_RENDERER.render(final_url)
+                        if rendered_url:
+                            final_url = rendered_url
+                        set_cached_render(final_url, html)
 
 
-                # 🔒 Extract URLs ONLY after JS handling
-                urls, _ = extract_urls(html, url)
+                # 🔒 Extract URLs ONLY after JS handling, using the latest final_url
+                urls, _ = extract_urls(html, final_url)
 
                 if not urls:
-                    self.warning(f"[WARN] No URLs extracted from {url}")
+                    self.warning(f"[WARN] No URLs extracted from {final_url}")
                     self.warning(f"   HTML size: {len(html)} bytes")
                     self.warning(f"   Possible cause: JS-rendered content or minimal links")
                 else:
-                    self.info(f"Extracted {len(urls)} URLs from {url}")
+                    self.info(f"Extracted {len(urls)} URLs from {final_url}")
 
-                # ---------------- MODE LOGIC ----------------
                 # ---------------- MODE LOGIC ----------------
                 if self.crawl_mode == "BASELINE":
                     baseline_id, path = save_baseline_if_unique(
                         custid=self.custid,
                         siteid=self.siteid,
-                        url=url,
+                        url=final_url, # Use final_url for baseline
                         html=html,
                         base_url=self.seed_url,
                     )
 
                     if baseline_id:
-                        # Baseline pages are a separate count. 
-                        # We don't increment saved_count here to avoid double-counting crawl_pages
-                        self.info(f"DB: Saved baseline hash for {url} with ID {baseline_id}")
+                        self.info(f"DB: Saved baseline hash for {final_url} with ID {baseline_id}")
                     else:
-                        # If a baseline is duplicate but the SITE fetch was new (CRAWL_PAGES Inserted),
-                        # we still treat it as successful for stats. 
-                        # duplicate_count is already handled by insert_crawl_page logic above.
-                        self.info(f"DB: Duplicate baseline URL skipped for {url}")
+                        self.info(f"DB: Duplicate baseline URL skipped for {final_url}")
 
 
                 elif self.crawl_mode == "COMPARE":
                     self.compare_engine.handle_page(
                         siteid=self.siteid,
-                        url=url,
+                        url=final_url,
                         html=html,
                         base_url=self.seed_url,
                     )
@@ -328,14 +340,15 @@ class Worker(threading.Thread):
                         blocked_rule_count += 1
                         continue
 
-                    if not _allowed_domain(self.seed_url, u):
+                    # Allow domain change if it's the destination of the seed OR matches seed domain
+                    if not _allowed_domain(self.seed_url, u, current_url=final_url):
                         with BLOCK_LOCK:
                             BLOCK_REPORT["DOMAIN_FILTER"]["count"] += 1
                             BLOCK_REPORT["DOMAIN_FILTER"]["urls"].append(u)
                         blocked_domain_count += 1
                         continue
 
-                    if self.frontier.enqueue(u, url, depth + 1, preference_url=self.seed_url):
+                    if self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.seed_url):
                         enqueued_count += 1
                     else:
                         self.frontier_duplicate_count += 1
