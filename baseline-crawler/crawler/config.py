@@ -28,6 +28,7 @@ except NameError:
 # Worker scaling parameters
 MIN_WORKERS = 5
 MAX_WORKERS = 50
+CRAWL_DELAY = 1.0  # Seconds between requests per worker to avoid 429s
 
 # Playwright / JS Rendering Waiting Periods (seconds)
 JS_GOTO_TIMEOUT = 30

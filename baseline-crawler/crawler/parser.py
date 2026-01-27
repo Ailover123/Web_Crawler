@@ -60,10 +60,22 @@ def extract_urls(html, base_url):
 
     # Extract from <a href>
     for a in soup.find_all('a', href=True):
-        href = a['href']
+        href = a['href'].strip()
         # Skip pure fragment anchors (e.g., '#pricing')
-        if href.strip().startswith('#'):
+        if not href or href.startswith('#'):
             continue
+            
+        # FIX: Handle absolute-ish links that cause doubling (e.g. "https:allianceproit.com")
+        temp_href = href
+        if temp_href.startswith(('http:', 'https:')) and not temp_href.startswith(('http://', 'https://')):
+            temp_href = temp_href.split(':', 1)[1]
+            
+        if not href.startswith(('http://', 'https://', '/')):
+            # If the first segment looks like our domain, force it to be an absolute https link
+            first_segment = temp_href.split('/')[0]
+            if first_segment.lower() in (base_domain.lower(), f"www.{base_domain.lower()}"):
+                href = "https://" + temp_href.lstrip('/')
+
         url = strip_fragment(urljoin(base_url, href))
         if _is_allowed_url(url, base_domain):
             urls.append(url)
@@ -105,14 +117,7 @@ def _is_allowed_url(url, base_domain):
     if parsed.scheme not in ("http", "https"):
         return False
 
-    # Normalize hosts by stripping ports and leading 'www.'
-    def _canon_host(host: str) -> str:
-        if not host:
-            return ""
-        h = host.lower().split(":")[0]
-        return h[4:] if h.startswith("www.") else h
-
-    cand = _canon_host(parsed.netloc)
-    base = _canon_host(base_domain)
+    cand = parsed.netloc.lower().split(":")[0]
+    base = base_domain.lower().split(":")[0]
 
     return cand == base

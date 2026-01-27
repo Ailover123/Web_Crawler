@@ -5,7 +5,7 @@ import re
 from collections import defaultdict
 from urllib.parse import urlparse
 from datetime import datetime, timezone
-
+from crawler.config import CRAWL_DELAY
 from crawler.fetcher import fetch
 from crawler.parser import extract_urls
 from crawler.normalizer import (
@@ -90,29 +90,17 @@ def classify_block(url: str):
 
 def _allowed_domain(seed_url: str, candidate_url: str, current_url: str = None) -> bool:
     """
-    Strict domain check. Since normalize_url now handles branding preferences,
-    we just need to check if the netlocs match exactly after preference-aware normalization.
-    
-    If current_url is provided, it also allows the domain of the page we are currently on
-    (handles cases where the seed redirects to a new branding domain).
+    Strict domain check. Only allows URLs that exactly match the netloc of the seed
+    or the current page (if different due to redirect).
     """
-    from crawler.normalizer import normalize_url
-    
-    # Normalize with seed_url preference
-    s_norm = normalize_url(seed_url, preference_url=seed_url)
-    c_norm = normalize_url(candidate_url, preference_url=seed_url)
-    
-    s_netloc = urlparse(s_norm).netloc.lower().split(":")[0]
-    c_netloc = urlparse(c_norm).netloc.lower().split(":")[0]
+    s_netloc = urlparse(seed_url).netloc.lower().split(":")[0]
+    c_netloc = urlparse(candidate_url).netloc.lower().split(":")[0]
 
     if s_netloc == c_netloc:
         return True
 
-    # If the current page is on a different domain (allowed redirect), 
-    # allow links to that same domain.
     if current_url:
-        curr_norm = normalize_url(current_url, preference_url=seed_url)
-        curr_netloc = urlparse(curr_norm).netloc.lower().split(":")[0]
+        curr_netloc = urlparse(current_url).netloc.lower().split(":")[0]
         if curr_netloc == c_netloc:
             return True
 
@@ -191,6 +179,11 @@ class Worker(threading.Thread):
                 continue
 
             url, parent, depth = item
+            
+            # --- CRAWL DELAY ---
+            if CRAWL_DELAY > 0:
+                time.sleep(CRAWL_DELAY)
+                
             start = time.time()
 
             try:

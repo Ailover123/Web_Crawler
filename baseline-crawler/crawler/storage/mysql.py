@@ -67,10 +67,11 @@ def insert_crawl_job(job_id, custid, siteid, start_url=None):
                 job_id,
                 custid,
                 siteid,
+                start_url,
                 status
-            ) VALUES (%s, %s, %s, 'running')
+            ) VALUES (%s, %s, %s, %s, 'running')
             """,
-            (job_id, custid, siteid),
+            (job_id, custid, siteid, start_url),
         )
         conn.commit()
     except Error:

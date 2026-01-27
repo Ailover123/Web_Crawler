@@ -15,15 +15,14 @@ def fetch(url, discovered_from=None, depth=0):
     Fetch a URL and return structured result.
     Includes exponential backoff for HTTP 429 (Rate Limit).
     """
-    max_retries = 2
-    retry_delay = 2  # Start with 2 seconds
+    max_retries = 3
+    retry_delay = 5  # Increased from 2s to 5s as requested
 
     for attempt in range(max_retries + 1):
         start_time = time.time()
         try:
             headers = {
-                "User-Agent": USER_AGENT,
-                "Accept": "*/*"
+                "User-Agent": USER_AGENT
             }
             r = requests.get(
                 url,
@@ -81,6 +80,11 @@ def fetch(url, discovered_from=None, depth=0):
             }
 
         except requests.exceptions.ConnectionError:
+            if attempt < max_retries:
+                logger.warning(f"[RETRY {attempt+1}/{max_retries}] Connection Error for {url}. Waiting {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+                continue
             return {
                 "success": False,
                 "error": "connection error",
