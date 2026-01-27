@@ -120,8 +120,8 @@ def insert_crawl_page(data):
         return
 
     # User Req: Skip root domain for crawl_pages table ONLY
-    if "/" not in canonical_url:
-        return
+  #  if "/" not in canonical_url:
+        #return
 
     conn = get_connection()
     try:
@@ -187,10 +187,8 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
 
 def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, base_url=None):
     """
-    Baseline pages are INSERTED ONCE and NEVER UPDATED from the crawler.
-    Uses INSERT IGNORE to protect existing baselines.
-    Returns:
-        bool: True if inserted, False if duplicate/ignored.
+    Insert or UPDATE baseline for a URL.
+    Always keeps the latest baseline.
     """
     canonical_url = get_canonical_id(normalized_url, base_url)
     if not canonical_url:
@@ -201,18 +199,22 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT IGNORE INTO baseline_pages
+            INSERT INTO baseline_pages
                 (site_id, normalized_url, content_hash, baseline_path)
             VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                content_hash = VALUES(content_hash),
+                baseline_path = VALUES(baseline_path)
             """,
             (site_id, canonical_url, content_hash, baseline_path),
         )
         conn.commit()
-        return cur.rowcount > 0
+        return True
     finally:
         cur.close()
         conn.close()
         DB_SEMAPHORE.release()
+
 
 
 def fetch_baseline_hash(site_id, normalized_url, base_url=None):
