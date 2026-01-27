@@ -13,7 +13,7 @@ from crawler.normalizer import (
     normalize_url,
 )
 from crawler.storage.db import insert_crawl_page
-from crawler.storage.baseline_store import save_baseline_if_unique
+from crawler.storage.baseline_store import save_baseline
 from crawler.compare_engine import CompareEngine
 
 from crawler.js_detect import needs_js_rendering
@@ -212,7 +212,7 @@ class Worker(threading.Thread):
 
                 if self.crawl_mode == "BASELINE":
                     # Save baseline only if unique; DB dedup handles hash check
-                    baseline_id, path = save_baseline_if_unique(
+                    baseline_id, path = save_baseline(
                         custid=self.custid,
                         siteid=self.siteid,
                         url=self._db_url(url),
