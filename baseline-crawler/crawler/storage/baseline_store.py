@@ -42,42 +42,46 @@ def _next_baseline_id(site_dir: Path, siteid: int) -> str:
         return f"{siteid}-{_SITE_MAX_IDS[siteid]}"
 
 
-def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
+def save_baseline(*, custid, siteid, url, html, base_url=None):
     """
-    Tries to insert the baseline hash into the DB FIRST.
-    If the DB accepts it (new unique content for this URL), writes the file to disk.
-    If the DB rejects it (duplicate URL), skips writing the file.
-    
+    Creates or UPDATES the baseline for a URL.
+
     Returns:
-        (baseline_id, path_str) if saved.
-        (None, None) if duplicate/skipped.
+        (baseline_id, path, action)
+        action ∈ {"created", "updated"}
     """
+
     normalized_url = normalize_url(url, preference_url=base_url)
-    content_hash = sha256(normalize_html(html))
 
-    # 1. Check DB for EXISTING hash (Prevent Burnt IDs)
+    from compare_utils import semantic_hash
+    content_hash = semantic_hash(html)
+
+    # 1️⃣ Check if baseline already exists (for logging only)
     existing = fetch_baseline_hash(
-    site_id=siteid,
-    normalized_url=normalized_url,
-    base_url=base_url
-)
+        site_id=siteid,
+        normalized_url=normalized_url,
+        base_url=base_url,
+    )
 
-# If ANY baseline exists for this URL → skip
-    if existing:
-     return None, None
+    action = "updated" if existing else "created"
 
-
-    # 2. Prepare Data (Generate ID only if unique)
+    # 2️⃣ Prepare directory
     site_dir = BASELINE_ROOT / str(custid) / str(siteid)
     site_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline_id = _next_baseline_id(site_dir, siteid)
+    # 3️⃣ Stable baseline ID per URL
+    url_fingerprint = sha256(normalized_url)[:12]
+    baseline_id = f"{siteid}-{url_fingerprint}"
     path = site_dir / f"{baseline_id}.html"
-    
-    print(f"Generating baseline for {url} with ID {baseline_id}")
 
-    # 3. Try DB Insert (Should succeed since we checked, but safe to keep upsert/ignore)
-    inserted = upsert_baseline_hash(
+    print(
+    f"[BASELINE] {action.upper()} baseline "
+    f"id={baseline_id} url={url}"
+)
+
+
+    # 4️⃣ UPSERT baseline (always)
+    upsert_baseline_hash(
         site_id=siteid,
         normalized_url=normalized_url,
         content_hash=content_hash,
@@ -85,14 +89,10 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
         base_url=base_url,
     )
 
-    if not inserted:
-        # Edge case: Race condition or concurrent write caught by DB
-        return None, None
-
-    # 4. Write File (Only if DB accepted)
+    # 5️⃣ Overwrite file
     path.write_text(html.strip(), encoding="utf-8")
 
-    # 5. Link to Defacement Site (Legacy logic, but correct for Reference)
+    # 6️⃣ Link defacement site (idempotent)
     insert_defacement_site(
         siteid=siteid,
         baseline_id=baseline_id,
@@ -100,4 +100,5 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
         base_url=base_url,
     )
 
-    return baseline_id, str(path)
+    return baseline_id, str(path), action
+

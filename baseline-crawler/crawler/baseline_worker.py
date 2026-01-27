@@ -2,7 +2,7 @@
 
 from crawler.fetcher import fetch
 from crawler.storage.crawl_reader import iter_crawl_urls
-from crawler.storage.baseline_store import save_baseline_if_unique
+from crawler.storage.baseline_store import save_baseline
 from crawler.normalizer import normalize_url
 
 
@@ -26,7 +26,7 @@ class BaselineWorker:
             return
 
         created = 0
-        skipped = 0
+        updated = 0
         failed = 0
 
         for url in urls:
@@ -46,7 +46,7 @@ class BaselineWorker:
                 if "text/html" not in ct:
                     continue
 
-                baseline_id, path = save_baseline_if_unique(
+                baseline_id, path, action = save_baseline(
                     custid=self.custid,
                     siteid=self.siteid,
                     url=url,
@@ -54,14 +54,21 @@ class BaselineWorker:
                     base_url=self.seed_url,
                 )
 
-                if baseline_id:
+                if action == "created":
                     created += 1
                 else:
-                    skipped += 1
+                    updated += 1
+
 
             except Exception as e:
                 failed += 1
 
-        print(
-            f"[BASELINE] Done | created={created} skipped={skipped} failed={failed}"
-        )
+        if updated == 0:
+            print(
+                f"[BASELINE] Done | created={created} failed={failed}"
+            )
+        else:
+            print(
+                f"[BASELINE] Done | updated={updated} failed={failed}"
+            )
+
