@@ -103,10 +103,12 @@ def main():
         custid = site["custid"]
 
         # 🔑 Resolve seed FIRST, normalize AFTER
-        from crawler.url_utils import canonicalize_seed
+        from crawler.url_utils import canonicalize_seed, force_www_url
 
         resolved_seed = resolve_seed_url(site["url"])
-        start_url = canonicalize_seed(resolved_seed)
+        
+        # Force www for fetch/start
+        start_url = force_www_url(canonicalize_seed(resolved_seed))
 
 
         job_id = str(uuid.uuid4())

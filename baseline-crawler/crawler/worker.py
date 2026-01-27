@@ -12,6 +12,7 @@ from crawler.normalizer import (
     normalize_rendered_html,
     normalize_url,
 )
+from crawler.url_utils import force_www_url
 from crawler.storage.db import insert_crawl_page
 from crawler.storage.baseline_store import (
     save_baseline,
@@ -189,7 +190,10 @@ class Worker(threading.Thread):
             try:
                 self.info(f"Crawling {url}")
 
-                result = fetch(url, parent, depth)
+                # 🔒 Force www prefix for the network fetch
+                fetch_url = force_www_url(url)
+                
+                result = fetch(fetch_url, parent, depth)
                 fetched_at = datetime.now()
 
                 if not result["success"]:

@@ -2,6 +2,7 @@ from crawler.fetcher import fetch
 from crawler.storage.crawl_reader import iter_crawl_urls
 from crawler.storage.baseline_store import save_baseline
 from crawler.normalizer import normalize_url
+from crawler.url_utils import force_www_url
 from crawler.logger import logger
 
 
@@ -33,6 +34,9 @@ class BaselineWorker:
                     url,
                     preference_url=self.seed_url
                 )
+                
+                # 🔒 Force www prefix for refetching
+                fetch_url = force_www_url(fetch_url)
 
                 result = fetch(fetch_url)
                 if not result["success"]:
