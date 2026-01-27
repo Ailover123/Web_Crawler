@@ -12,6 +12,8 @@ import time
 import uuid
 import os
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from crawler.frontier import Frontier
 from crawler.worker import Worker
@@ -65,6 +67,7 @@ def resolve_seed_url(raw_url: str) -> str:
                 timeout=12,
                 allow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"},
+                verify=False,
             )
             if r.status_code < 400:
                 # lock final resolved URL

@@ -6,6 +6,8 @@ NO database writes happen here.
 
 import requests
 import time
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from crawler.config import USER_AGENT, REQUEST_TIMEOUT
 from crawler.logger import logger
 
@@ -28,7 +30,7 @@ def fetch(url, discovered_from=None, depth=0):
                 url,
                 timeout=REQUEST_TIMEOUT,
                 headers=headers,
-                verify=True,
+                verify=False,
                 allow_redirects=True,
             )
 
