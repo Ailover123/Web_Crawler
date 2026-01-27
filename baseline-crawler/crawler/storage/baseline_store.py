@@ -1,84 +1,92 @@
 # crawler/storage/baseline_store.py
 
+import threading
 from pathlib import Path
 from crawler.storage.db import insert_defacement_site
-from crawler.storage.mysql import upsert_baseline_hash, fetch_baseline_hash
-from crawler.normalizer import normalize_html, normalize_url
-from crawler.hasher import sha256
+from crawler.storage.mysql import upsert_baseline_hash, fetch_baseline_hash, get_connection
+from crawler.normalizer import normalize_url
 from crawler.logger import logger
-
-import threading
+from compare_utils import semantic_hash
 
 BASELINE_ROOT = Path("baselines")
 
-# Global lock and cache for sequence numbers
+# Thread-safe lock for sequence generation
 _ID_LOCK = threading.Lock()
 _SITE_MAX_IDS = {}
 
 
-def _next_baseline_id(site_dir: Path, siteid: int) -> str:
+def _get_next_sequence_id(siteid):
     """
-    Thread-safe generation of the next baseline ID.
-    Uses an in-memory cache to avoid O(N) disk scans on every write.
+    Finds the next available sequence number for a site by scanning the DB once.
+    Then uses an in-memory counter for this run.
     """
     with _ID_LOCK:
         if siteid not in _SITE_MAX_IDS:
-            max_seq = 0
-            prefix = f"{siteid}-"
-            
-            if site_dir.exists():
-                for f in site_dir.glob(f"{siteid}-*.html"):
-                    try:
-                        stem = f.stem
-                        if stem.startswith(prefix):
-                            num = int(stem[len(prefix):])
+            conn = get_connection()
+            try:
+                cur = conn.cursor()
+                # Find the highest number after the '-' in the baseline_path/id
+                cur.execute(
+                    "SELECT baseline_path FROM baseline_pages WHERE site_id = %s", 
+                    (siteid,)
+                )
+                rows = cur.fetchall()
+                max_seq = 0
+                for row in rows:
+                    if row[0]:
+                        try:
+                            # Path is like 'baselines/101/10106/10106-5.html'
+                            stem = Path(row[0]).stem
+                            num = int(stem.split("-")[1])
                             if num > max_seq:
                                 max_seq = num
-                    except ValueError:
-                        pass
-            
-            _SITE_MAX_IDS[siteid] = max_seq
+                        except (IndexError, ValueError):
+                            continue
+                _SITE_MAX_IDS[siteid] = max_seq
+            finally:
+                cur.close()
+                conn.close()
+                from crawler.storage.db_guard import DB_SEMAPHORE
+                DB_SEMAPHORE.release()
 
         _SITE_MAX_IDS[siteid] += 1
         return f"{siteid}-{_SITE_MAX_IDS[siteid]}"
 
 
-def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
+def save_baseline(*, custid, siteid, url, html, base_url=None):
     """
-    Tries to insert the baseline hash into the DB FIRST.
-    If the DB accepts it (new unique content for this URL), writes the file to disk.
-    If the DB rejects it (duplicate URL), skips writing the file.
-    
-    Returns:
-        (baseline_id, path_str) if saved.
-        (None, None) if duplicate/skipped.
+    Creates or UPDATES baseline for a URL.
+    - Reuses existing baseline_id if present
+    - Unconditional update (as requested)
     """
     normalized_url = normalize_url(url, preference_url=base_url)
-    content_hash = sha256(normalize_html(html))
+    content_hash = semantic_hash(html)
 
-    # 1. Check DB for EXISTING hash (Prevent Burnt IDs)
+    # 1. Check for existing record
     existing = fetch_baseline_hash(
-    site_id=siteid,
-    normalized_url=normalized_url,
-    base_url=base_url
-)
+        site_id=siteid,
+        normalized_url=normalized_url,
+        base_url=base_url
+    )
 
-# If ANY baseline exists for this URL → skip
-    if existing:
-     return None, None
-
-
-    # 2. Prepare Data (Generate ID only if unique)
     site_dir = BASELINE_ROOT / str(custid) / str(siteid)
     site_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline_id = _next_baseline_id(site_dir, siteid)
-    path = site_dir / f"{baseline_id}.html"
-    
-    logger.info(f"[BASELINE] Generating baseline for {url} with ID {baseline_id}")
+    if existing and existing.get("baseline_path"):
+        # REUSE EXISTING ID
+        path = Path(existing["baseline_path"])
+        baseline_id = path.stem
+        action = "updated"
+    else:
+        # GENERATE NEW SEQUENTIAL ID
+        baseline_id = _get_next_sequence_id(siteid)
+        path = site_dir / f"{baseline_id}.html"
+        action = "created"
 
-    # 3. Try DB Insert (Should succeed since we checked, but safe to keep upsert/ignore)
-    inserted = upsert_baseline_hash(
+    logger.info(f"[BASELINE] {action.upper()} baseline for {url} with ID {baseline_id}")
+
+    # 2. Update Database (Always)
+    upsert_baseline_hash(
         site_id=siteid,
         normalized_url=normalized_url,
         content_hash=content_hash,
@@ -86,14 +94,10 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
         base_url=base_url,
     )
 
-    if not inserted:
-        # Edge case: Race condition or concurrent write caught by DB
-        return None, None
-
-    # 4. Write File (Only if DB accepted)
+    # 3. Write File
     path.write_text(html.strip(), encoding="utf-8")
 
-    # 5. Link to Defacement Site (Legacy logic, but correct for Reference)
+    # 4. Link to Defacement Site
     insert_defacement_site(
         siteid=siteid,
         baseline_id=baseline_id,
@@ -101,4 +105,6 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
         base_url=base_url,
     )
 
-    return baseline_id, str(path)
+    return baseline_id, str(path), action
+
+

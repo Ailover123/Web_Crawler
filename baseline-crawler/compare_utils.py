@@ -346,6 +346,17 @@ def calculate_defacement_percentage(
     return round(min(100.0, pct), 2)
 
 
+def semantic_hash(html: str) -> str:
+    """
+    Generate a SHA256 hash of the semantic content of the HTML.
+    Stable against whitespace and attribute ordering changes.
+    """
+    import hashlib
+    lines = _html_to_semantic_lines(html)
+    content = "\n".join(lines)
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 def defacement_severity(score: float) -> str:
     if score < 5:
         return "LOW"

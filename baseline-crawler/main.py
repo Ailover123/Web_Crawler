@@ -137,16 +137,31 @@ def main():
                 from crawler.baseline_worker import BaselineWorker
                 logger.info(f"[MODE] BASELINE (offline refetch from DB for siteid={siteid})")
 
-                BaselineWorker(
+                start_time = time.time()
+                stats = BaselineWorker(
                     custid=custid,
                     siteid=siteid,
                     seed_url=start_url,
                 ).run()
+                duration = time.time() - start_time
 
                 complete_crawl_job(
                     job_id=job_id,
                     pages_crawled=0,
                 )
+
+                logger.info("-" * 60)
+                logger.info("BASELINE GENERATION COMPLETED")
+                logger.info("-" * 60)
+                logger.info(f"Job ID            : {job_id}")
+                logger.info(f"Customer ID       : {custid}")
+                logger.info(f"Site ID           : {siteid}")
+                logger.info(f"Seed URL          : {start_url}")
+                logger.info(f"Baselines Created : {stats.get('created', 0)}")
+                logger.info(f"Baselines Updated : {stats.get('updated', 0)}")
+                logger.info(f"Baselines Failed  : {stats.get('failed', 0)}")
+                logger.info(f"Duration          : {duration:.2f} seconds")
+                logger.info("-" * 60)
                 continue
 
             # ====================================================

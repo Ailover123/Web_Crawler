@@ -137,7 +137,8 @@ def insert_crawl_page(data):
                 content_type=VALUES(content_type),
                 content_length=VALUES(content_length),
                 response_time_ms=VALUES(response_time_ms),
-                fetched_at=VALUES(fetched_at)
+                fetched_at=VALUES(fetched_at),
+                updated_at=CURRENT_TIMESTAMP
             """,
             (
                 data["job_id"], data["custid"], data["siteid"],
@@ -200,9 +201,13 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT IGNORE INTO baseline_pages
+            INSERT INTO baseline_pages
                 (site_id, normalized_url, content_hash, baseline_path)
             VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                content_hash = VALUES(content_hash),
+                baseline_path = VALUES(baseline_path),
+                updated_at = CURRENT_TIMESTAMP
             """,
             (site_id, canonical_url, content_hash, baseline_path),
         )
@@ -222,7 +227,7 @@ def fetch_baseline_hash(site_id, normalized_url, base_url=None):
         canonical_url = get_canonical_id(normalized_url, base_url)
         cur.execute(
             """
-            SELECT content_hash
+            SELECT content_hash, baseline_path
             FROM baseline_pages
             WHERE site_id=%s AND normalized_url=%s
             """,

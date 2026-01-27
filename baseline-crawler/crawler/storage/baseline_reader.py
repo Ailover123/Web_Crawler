@@ -1,29 +1,69 @@
-# crawler/baseline_reader.py
+# crawler/storage/baseline_reader.py
 
 from crawler.storage.mysql import get_connection
 from crawler.storage.db_guard import DB_SEMAPHORE
 
 
-from crawler.normalizer import get_canonical_id
-
-def get_baseline_hash(*, site_id: int, normalized_url: str, base_url: str | None = None):
+def get_baseline_hash(
+    *,
+    site_id: int,
+    normalized_url: str,
+    base_url: str | None = None,
+):
     """
     Fetch baseline row for a given page.
+
+    Returns:
+      {
+        "id": int,
+        "content_hash": str,
+        "baseline_path": str
+      }
+    or None
     """
+
     conn = get_connection()
     try:
-        cur = conn.cursor(dictionary=True)
-        canonical_url = get_canonical_id(normalized_url, base_url)
-        cur.execute(
-            """
-            SELECT id, content_hash
-            FROM baseline_pages
-            WHERE site_id=%s AND normalized_url=%s
-            """,
-            (site_id, canonical_url),
-        )
-        return cur.fetchone()
+        with conn.cursor(dictionary=True) as cur:
+            # Try exact match first
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    content_hash,
+                    baseline_path
+                FROM baseline_pages
+                WHERE site_id = %s
+                  AND normalized_url = %s
+                LIMIT 1
+                """,
+                (site_id, normalized_url),
+            )
+            row = cur.fetchone()
+            if row:
+                return row
+
+            # Fallback: try without trailing slash
+            if normalized_url.endswith("/"):
+                alt = normalized_url.rstrip("/")
+            else:
+                alt = normalized_url + "/"
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    content_hash,
+                    baseline_path
+                FROM baseline_pages
+                WHERE site_id = %s
+                  AND normalized_url = %s
+                LIMIT 1
+                """,
+                (site_id, alt),
+            )
+            return cur.fetchone()
+
     finally:
-        cur.close()
         conn.close()
         DB_SEMAPHORE.release()

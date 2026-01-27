@@ -14,7 +14,7 @@ from crawler.normalizer import (
 )
 from crawler.storage.db import insert_crawl_page
 from crawler.storage.baseline_store import (
-    save_baseline_if_unique,
+    save_baseline,
 )
 from crawler.compare_engine import CompareEngine
 
@@ -190,7 +190,7 @@ class Worker(threading.Thread):
                 self.info(f"Crawling {url}")
 
                 result = fetch(url, parent, depth)
-                fetched_at = datetime.now(timezone.utc)
+                fetched_at = datetime.now()
 
                 if not result["success"]:
                     err = result.get("error", "unknown")
@@ -295,7 +295,7 @@ class Worker(threading.Thread):
 
                 # ---------------- MODE LOGIC ----------------
                 if self.crawl_mode == "BASELINE":
-                    baseline_id, path = save_baseline_if_unique(
+                    baseline_id, path, action = save_baseline(
                         custid=self.custid,
                         siteid=self.siteid,
                         url=final_url, # Use final_url for baseline
@@ -304,9 +304,7 @@ class Worker(threading.Thread):
                     )
 
                     if baseline_id:
-                        self.info(f"DB: Saved baseline hash for {final_url} with ID {baseline_id}")
-                    else:
-                        self.info(f"DB: Duplicate baseline URL skipped for {final_url}")
+                        self.info(f"DB: {action.upper()} baseline for {final_url} with ID {baseline_id}")
 
 
                 elif self.crawl_mode == "COMPARE":
