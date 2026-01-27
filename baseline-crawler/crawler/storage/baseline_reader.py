@@ -1,7 +1,7 @@
 # crawler/storage/baseline_reader.py
 
 from crawler.storage.mysql import get_connection
-from crawler.normalizer import get_canonical_id
+from crawler.storage.db_guard import DB_SEMAPHORE
 
 
 def get_baseline_hash(
@@ -66,3 +66,4 @@ def get_baseline_hash(
 
     finally:
         conn.close()
+        DB_SEMAPHORE.release()
