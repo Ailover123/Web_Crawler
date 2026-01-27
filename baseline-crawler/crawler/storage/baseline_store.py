@@ -5,6 +5,7 @@ from crawler.storage.db import insert_defacement_site
 from crawler.storage.mysql import upsert_baseline_hash, fetch_baseline_hash
 from crawler.normalizer import normalize_html, normalize_url
 from crawler.hasher import sha256
+from crawler.logger import logger
 
 import threading
 
@@ -57,13 +58,15 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
 
     # 1. Check DB for EXISTING hash (Prevent Burnt IDs)
     existing = fetch_baseline_hash(
-        site_id=siteid, 
-        normalized_url=normalized_url, 
-        base_url=base_url
-    )
-    if existing and existing.get("content_hash") == content_hash:
-        # It's a duplicate. Return None immediately to avoid burning an ID.
-        return None, None
+    site_id=siteid,
+    normalized_url=normalized_url,
+    base_url=base_url
+)
+
+# If ANY baseline exists for this URL → skip
+    if existing:
+     return None, None
+
 
     # 2. Prepare Data (Generate ID only if unique)
     site_dir = BASELINE_ROOT / str(custid) / str(siteid)
@@ -72,7 +75,7 @@ def save_baseline_if_unique(*, custid, siteid, url, html, base_url=None):
     baseline_id = _next_baseline_id(site_dir, siteid)
     path = site_dir / f"{baseline_id}.html"
     
-    print(f"Generating baseline for {url} with ID {baseline_id}")
+    logger.info(f"[BASELINE] Generating baseline for {url} with ID {baseline_id}")
 
     # 3. Try DB Insert (Should succeed since we checked, but safe to keep upsert/ignore)
     inserted = upsert_baseline_hash(

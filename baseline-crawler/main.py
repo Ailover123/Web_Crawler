@@ -130,6 +130,28 @@ def main():
                 start_url=start_url,
             )
 
+            # ====================================================
+            # BASELINE MODE (REFETCH FROM DB)
+            # ====================================================
+            if CRAWL_MODE == "BASELINE":
+                from crawler.baseline_worker import BaselineWorker
+                logger.info(f"[MODE] BASELINE (offline refetch from DB for siteid={siteid})")
+
+                BaselineWorker(
+                    custid=custid,
+                    siteid=siteid,
+                    seed_url=start_url,
+                ).run()
+
+                complete_crawl_job(
+                    job_id=job_id,
+                    pages_crawled=0,
+                )
+                continue
+
+            # ====================================================
+            # CRAWL / COMPARE MODE (LIVE DISCOVERY)
+            # ====================================================
             frontier = Frontier()
             frontier.enqueue(start_url, None, 0, preference_url=site["url"])
 
