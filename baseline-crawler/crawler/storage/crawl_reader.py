@@ -12,16 +12,18 @@ def iter_crawl_urls(*, siteid: int):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT DISTINCT url
+            SELECT url, id
             FROM crawl_pages
             WHERE siteid = %s
               AND content_type LIKE 'text/html%%'
+            GROUP BY url
+            ORDER BY MIN(id) ASC
             """,
             (siteid,),
         )
 
         rows = cur.fetchall()
-        return [url for (url,) in rows]
+        return [url for (url, id) in rows]
 
     finally:
         cur.close()
