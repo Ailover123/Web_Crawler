@@ -118,38 +118,66 @@ def insert_crawl_page(data):
     base_url = data.get("base_url")
     canonical_url = get_canonical_id(data["url"], base_url)
     if not canonical_url:
-        return
+        return None
 
     conn = get_connection()
     try:
         cur = conn.cursor()
+        
+        # 1. 🛡️ Check if the page already exists for this site
+        # We use (siteid, url) which matches the UNIQUE KEY unique_site_page
         cur.execute(
-            """
-            INSERT INTO crawl_pages
-            (job_id, custid, siteid, url, parent_url, depth, status_code,
-             content_type, content_length, response_time_ms, fetched_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON DUPLICATE KEY UPDATE
-                job_id=VALUES(job_id),
-                parent_url=VALUES(parent_url),
-                depth=VALUES(depth),
-                status_code=VALUES(status_code),
-                content_type=VALUES(content_type),
-                content_length=VALUES(content_length),
-                response_time_ms=VALUES(response_time_ms),
-                fetched_at=VALUES(fetched_at),
-                updated_at=CURRENT_TIMESTAMP
-            """,
-            (
-                data["job_id"], data["custid"], data["siteid"],
-                canonical_url, data["parent_url"], data["depth"],
-                data["status_code"], data["content_type"],
-                data["content_length"], data["response_time_ms"],
-                data["fetched_at"],
-            ),
+            "SELECT id FROM crawl_pages WHERE siteid = %s AND url = %s",
+            (data["siteid"], canonical_url)
         )
+        row = cur.fetchone()
+
+        if row:
+            # 2. 🔄 UPDATE: Exists, so update the current row ID
+            existing_id = row[0]
+            cur.execute(
+                """
+                UPDATE crawl_pages SET
+                    job_id=%s, parent_url=%s, depth=%s, status_code=%s,
+                    content_type=%s, content_length=%s, response_time_ms=%s,
+                    fetched_at=%s, updated_at=CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (
+                    data["job_id"], data["parent_url"], data["depth"],
+                    data["status_code"], data["content_type"],
+                    data["content_length"], data["response_time_ms"],
+                    data["fetched_at"], existing_id
+                )
+            )
+            action = "Updated"
+            affected_id = existing_id
+        else:
+            # 3. 🆕 INSERT: Doesn't exist, so insert fresh
+            cur.execute(
+                """
+                INSERT INTO crawl_pages
+                (job_id, custid, siteid, url, parent_url, depth, status_code,
+                 content_type, content_length, response_time_ms, fetched_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    data["job_id"], data["custid"], data["siteid"],
+                    canonical_url, data["parent_url"], data["depth"],
+                    data["status_code"], data["content_type"],
+                    data["content_length"], data["response_time_ms"],
+                    data["fetched_at"]
+                )
+            )
+            action = "Inserted"
+            affected_id = cur.lastrowid
+
         conn.commit()
-        return "Inserted" if cur.rowcount == 1 else "Updated"
+
+        return {
+            "action": action,
+            "id": affected_id
+        }
     finally:
         cur.close()
         conn.close()
