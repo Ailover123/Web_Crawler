@@ -234,7 +234,7 @@ class Worker(threading.Thread):
                 if final_url != url:
                     self.info(f"[REDIRECT] Original URL was {url} but it redirected to {final_url}")
 
-                db_action = insert_crawl_page({
+                db_result = insert_crawl_page({
                     "job_id": self.job_id,
                     "custid": self.custid,
                     "siteid": self.siteid,
@@ -249,19 +249,26 @@ class Worker(threading.Thread):
                     "base_url": self.seed_url, # Pass preference
                 })
 
+                if not db_result:
+                    # Root URL skipped by policy in insert_crawl_page
+                    self.policy_skipped_count += 1
+                    self.info(f"DB: Skipped crawl_pages for {url} (policy)")
+                    continue
+
+                db_action = db_result["action"]
+                affected_id = db_result["id"]
+
                 if db_action == "Inserted":
                     # Only increment saved_count if it's a genuine NEW insertion
                     if self.crawl_mode in ("CRAWL", "BASELINE"):
                         self.saved_count += 1
-                    self.info(f"DB: Inserted crawl_pages for {final_url}")
+                    self.info(f"DB: Inserted crawl_pages for {final_url} (ID: {affected_id})")
                 elif db_action == "Updated":
                     # Canonical duplicate (e.g. http vs https pair)
                     self.duplicate_count += 1
-                    self.info(f"DB: Updated crawl_pages for {final_url}")
+                    self.info(f"DB: Updated crawl_pages for {final_url} (ID: {affected_id})")
                 else:
-                    # Root URL skipped by policy in insert_crawl_page
-                    self.policy_skipped_count += 1
-                    self.info(f"DB: Skipped crawl_pages for {url} (policy)")
+                    self.info(f"DB: Action {db_action} for {url}")
 
                 if "text/html" not in ct.lower():
                     continue
