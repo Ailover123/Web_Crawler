@@ -238,6 +238,25 @@ def fetch_baseline_hash(site_id, normalized_url, base_url=None):
         DB_SEMAPHORE.release()
 
 
+def fetch_site_info_by_baseline_id(baseline_id):
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT siteid, url
+            FROM defacement_sites
+            WHERE baseline_id=%s
+            """,
+            (baseline_id,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+        DB_SEMAPHORE.release()
+
+
 # ============================================================
 # OBSERVED PAGE UPSERT (STATE, NOT HISTORY)
 # ============================================================
