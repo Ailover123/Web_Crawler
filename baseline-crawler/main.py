@@ -8,11 +8,15 @@ import site
 from dotenv import load_dotenv
 load_dotenv()
 
+import argparse
+import logging
 import time
 import uuid
 import os
 import requests
 import urllib3
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from crawler.frontier import Frontier
@@ -85,7 +89,136 @@ def resolve_seed_url(raw_url: str) -> str:
 # MAIN
 # ============================================================
 
+def crawl_site(site, args):
+    """
+    Crawls a single site. This function can be called sequentially or in parallel.
+    """
+    siteid = site["siteid"]
+    custid = site["custid"]
+
+    # 🔑 Resolve seed FIRST, normalize AFTER
+    from crawler.url_utils import canonicalize_seed, force_www_url
+
+    resolved_seed = resolve_seed_url(site["url"])
+    
+    # Force www for fetch/start
+    start_url = force_www_url(canonicalize_seed(resolved_seed))
+
+    job_id = str(uuid.uuid4())
+    
+    # Setup job logging if requested
+    job_logger = logger
+    file_handler = None
+    if args.log:
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, f"crawl_{siteid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        job_logger.addHandler(file_handler)
+
+    job_logger.info("=" * 60)
+    job_logger.info(f"Starting crawl job {job_id}")
+    job_logger.info(f"Customer ID : {custid}")
+    job_logger.info(f"Site ID     : {siteid}")
+    job_logger.info(f"Seed URL    : {start_url}")
+    job_logger.info("=" * 60)
+
+    try:
+        insert_crawl_job(
+            job_id=job_id,
+            custid=custid,
+            siteid=siteid,
+            start_url=start_url,
+        )
+
+        # ====================================================
+        # BASELINE MODE (REFETCH FROM DB)
+        # ====================================================
+        if CRAWL_MODE == "BASELINE":
+            from crawler.baseline_worker import BaselineWorker
+            job_logger.info(f"[MODE] BASELINE (offline refetch from DB for siteid={siteid})")
+
+            start_time = time.time()
+            stats = BaselineWorker(
+                custid=custid,
+                siteid=siteid,
+                seed_url=start_url,
+            ).run()
+
+            # 🛡️ Safety: Ensure stats is always a dictionary to avoid 'NoneType' errors
+            if stats is None:
+                stats = {"created": 0, "updated": 0, "failed": 0}
+
+            duration = time.time() - start_time
+            complete_crawl_job(job_id=job_id, pages_crawled=0)
+
+            job_logger.info("-" * 60)
+            job_logger.info("BASELINE GENERATION COMPLETED")
+            job_logger.info("-" * 60)
+            job_logger.info(f"Baselines Created : {stats.get('created', 0)}")
+            job_logger.info(f"Baselines Updated : {stats.get('updated', 0)}")
+            job_logger.info(f"Baselines Failed  : {stats.get('failed', 0)}")
+            job_logger.info(f"Duration          : {duration:.2f} seconds")
+            job_logger.info("-" * 60)
+            return
+
+        # ====================================================
+        # CRAWL / COMPARE MODE (LIVE DISCOVERY)
+        # ====================================================
+        frontier = Frontier()
+        frontier.enqueue(start_url, None, 0, preference_url=site["url"])
+
+        workers = []
+        start_time = time.time()
+        siteid_map = {siteid: siteid}
+
+        for i in range(INITIAL_WORKERS):
+            w = Worker(
+                frontier=frontier,
+                name=f"Worker-{siteid}-{i}",
+                custid=custid,
+                siteid_map=siteid_map,
+                job_id=job_id,
+                crawl_mode=CRAWL_MODE,
+                seed_url=site["url"],
+            )
+            w.start()
+            workers.append(w)
+
+        job_logger.info(f"Started {len(workers)} workers for site {siteid}.")
+        frontier.queue.join()
+
+        for w in workers: w.stop()
+        for w in workers: w.join()
+
+        duration = time.time() - start_time
+        stats = frontier.get_stats()
+        complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
+
+        total_saved = sum(w.saved_count for w in workers)
+        job_logger.info("-" * 60)
+        job_logger.info(f"CRAWL COMPLETED FOR SITE {siteid}")
+        job_logger.info(f"Total URLs Crawled: {total_saved}")
+        job_logger.info(f"Crawl duration    : {duration:.2f} seconds")
+        job_logger.info("-" * 60)
+
+    except Exception as e:
+        fail_crawl_job(job_id, str(e))
+        job_logger.error(f"Crawl job {job_id} failed: {e}")
+    finally:
+        if file_handler:
+            job_logger.removeHandler(file_handler)
+            file_handler.close()
+
 def main():
+    parser = argparse.ArgumentParser(description="Web Crawler Entry Point")
+    parser.add_argument("--siteid", type=int, nargs='+', help="Crawl one or more specific Site IDs")
+    parser.add_argument("--custid", type=int, nargs='+', help="Crawl all sites for one or more specific Customer IDs")
+    parser.add_argument("--parallel", action="store_true", help="Crawl multiple sites in parallel")
+    parser.add_argument("--log", action="store_true", help="Enable file logging for each job")
+    args = parser.parse_args()
+
     # ---------------- DB CHECK ----------------
     if not check_db_health():
         logger.error("MySQL health check failed.")
@@ -98,159 +231,29 @@ def main():
         logger.info("No enabled sites found.")
         return
 
-    logger.info(f"Found {len(sites)} enabled site(s).")
+    # Filter sites based on arguments
+    if args.siteid:
+        sites = [s for s in sites if s["siteid"] in args.siteid]
+    if args.custid:
+        sites = [s for s in sites if s["custid"] in args.custid]
 
-    # ---------------- PER SITE ----------------
-    for site in sites:
-        siteid = site["siteid"]
-        custid = site["custid"]
+    if not sites:
+        logger.info("No sites matched the specified filters.")
+        return
 
-        # 🔑 Resolve seed FIRST, normalize AFTER
-        from crawler.url_utils import canonicalize_seed, force_www_url
+    logger.info(f"Processing {len(sites)} site(s).")
 
-        resolved_seed = resolve_seed_url(site["url"])
-        
-        # Force www for fetch/start
-        start_url = force_www_url(canonicalize_seed(resolved_seed))
+    # ---------------- EXECUTION ----------------
+    if args.parallel:
+        max_parallel_sites = int(os.getenv("MAX_PARALLEL_SITES", 3))
+        logger.info(f"Parallel mode enabled (max {max_parallel_sites} sites at once).")
+        with ThreadPoolExecutor(max_workers=max_parallel_sites) as executor:
+            executor.map(lambda s: crawl_site(s, args), sites)
+    else:
+        for site in sites:
+            crawl_site(site, args)
 
-
-        job_id = str(uuid.uuid4())
-        
-        # Reset global block report for this site
-        from crawler.worker import BLOCK_REPORT
-        BLOCK_REPORT.clear()
-
-        logger.info("=" * 60)
-        logger.info(f"Starting crawl job {job_id}")
-        logger.info(f"Customer ID : {custid}")
-        logger.info(f"Site ID     : {siteid}")
-        logger.info(f"Seed URL    : {start_url}")
-        logger.info("=" * 60)
-
-        try:
-            insert_crawl_job(
-                job_id=job_id,
-                custid=custid,
-                siteid=siteid,
-                start_url=start_url,
-            )
-
-            # ====================================================
-            # BASELINE MODE (REFETCH FROM DB)
-            # ====================================================
-            if CRAWL_MODE == "BASELINE":
-                from crawler.baseline_worker import BaselineWorker
-                logger.info(f"[MODE] BASELINE (offline refetch from DB for siteid={siteid})")
-
-                start_time = time.time()
-                stats = BaselineWorker(
-                    custid=custid,
-                    siteid=siteid,
-                    seed_url=start_url,
-                ).run()
-                duration = time.time() - start_time
-
-                complete_crawl_job(
-                    job_id=job_id,
-                    pages_crawled=0,
-                )
-
-                logger.info("-" * 60)
-                logger.info("BASELINE GENERATION COMPLETED")
-                logger.info("-" * 60)
-                logger.info(f"Job ID            : {job_id}")
-                logger.info(f"Customer ID       : {custid}")
-                logger.info(f"Site ID           : {siteid}")
-                logger.info(f"Seed URL          : {start_url}")
-                logger.info(f"Baselines Created : {stats.get('created', 0)}")
-                logger.info(f"Baselines Updated : {stats.get('updated', 0)}")
-                logger.info(f"Baselines Failed  : {stats.get('failed', 0)}")
-                logger.info(f"Duration          : {duration:.2f} seconds")
-                logger.info("-" * 60)
-                continue
-
-            # ====================================================
-            # CRAWL / COMPARE MODE (LIVE DISCOVERY)
-            # ====================================================
-            frontier = Frontier()
-            frontier.enqueue(start_url, None, 0, preference_url=site["url"])
-
-            workers = []
-            start_time = time.time()
-
-            siteid_map = {siteid: siteid}
-
-            for i in range(INITIAL_WORKERS):
-                w = Worker(
-                    frontier=frontier,
-                    name=f"Worker-{i}",
-                    custid=custid,
-                    siteid_map=siteid_map,
-                    job_id=job_id,
-                    crawl_mode=CRAWL_MODE,
-                    seed_url=site["url"], # 🔒 USE REGISTERED URL FOR NAMING PREFERENCE
-                )
-                w.start()
-                workers.append(w)
-
-            logger.info(f"Started {len(workers)} workers.")
-
-            # 🔒 Deterministic completion
-            frontier.queue.join()
-
-            # ---------------- SHUTDOWN ----------------
-            for w in workers:
-                w.stop()
-            for w in workers:
-                w.join()
-
-            duration = time.time() - start_time
-            stats = frontier.get_stats()
-
-            complete_crawl_job(
-                job_id=job_id,
-                pages_crawled=stats["visited_count"],
-            )
-
-            logger.info("-" * 60)
-            logger.info("CRAWL COMPLETED")
-            logger.info("-" * 60)
-            logger.info(f"Job ID            : {job_id}")
-            logger.info(f"Customer ID       : {custid}")
-            logger.info(f"Site ID           : {siteid}")
-            logger.info(f"Seed URL          : {start_url}")
-            
-            total_saved = sum(w.saved_count for w in workers)
-            total_db_updates = sum(w.duplicate_count for w in workers)
-            total_failed = sum(w.failed_count for w in workers)
-            total_policy_skipped = sum(w.policy_skipped_count for w in workers)
-            total_frontier_skips = sum(w.frontier_duplicate_count for w in workers)
-            total_blocked = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in BLOCK_REPORT.values())
-            
-            # Total Duplicates = DB Updates + Frontier Skips
-            total_duplicates = total_db_updates + total_frontier_skips
-            
-            # Total Visited = Crawled + Duplicates + Blocked + Failed + Policy Skips
-            total_visited = total_saved + total_duplicates + total_blocked + total_failed + total_policy_skipped
-
-            logger.info(f"Total URLs Crawled: {total_saved}")
-            logger.info(f"Total URLs Visited: {total_visited}")
-            logger.info(f"Duplicates Skipped: {total_duplicates}")
-            logger.info(f" (Frontier Skips) : {total_frontier_skips}")
-            logger.info(f" (DB Updates)     : {total_db_updates}")
-            logger.info(f"Policy Skipped    : {total_policy_skipped}")
-            logger.info(f"URLs Blocked      : {total_blocked}")
-            logger.info(f"URLs Failed       : {total_failed}")
-            logger.info(f"Crawl duration    : {duration:.2f} seconds")
-            logger.info(f"Workers used      : {len(workers)}")
-            logger.info("-" * 60)
-
-        except Exception as e:
-            fail_crawl_job(job_id, str(e))
-            logger.error(f"Crawl job {job_id} failed: {e}")
-            raise
-
-    logger.info("All site crawls completed successfully.")
+    logger.info("All site crawls processed successfully.")
 
 
 # ============================================================
