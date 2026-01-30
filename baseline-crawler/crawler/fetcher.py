@@ -1,49 +1,88 @@
-"""Fetch utilities for the crawler.
-
-This module intentionally keeps a stable contract: callers receive either a
-``requests.Response`` for successful HTML/JSON responses, or a plain `dict`
-with ``ok: False`` and diagnostic fields. This avoids AttributeError in
-callers that expect a Response object.
+"""
+HTTP fetching module for the crawler.
+Fetches URLs and returns structured results.
+NO database writes happen here.
 """
 
 import requests
 import time
-from crawler.config import USER_AGENT, REQUEST_TIMEOUT, REQUEST_DELAY
+from crawler.config import USER_AGENT, REQUEST_TIMEOUT
 
 
-def fetch(url):
-    """Fetch a URL and return a Response or a failure dict.
-
-    Returns:
-      - ``requests.Response`` on success (only for content types containing
-        ``html`` or ``json``)
-      - ``dict`` with ``ok: False`` and diagnostics on failure
+def fetch(url, discovered_from=None, depth=0):
     """
-    try:
-        r = requests.get(
-            url,
-            timeout=REQUEST_TIMEOUT,
-            headers={"User-Agent": USER_AGENT},
-            verify=True,
-            allow_redirects=True,
-        )
-    except requests.exceptions.RequestException as e:
-        return {"ok": False, "url": url, "error": "request_exception", "message": str(e)}
+    Fetch a URL and return structured result.
+    Includes exponential backoff for HTTP 429 (Rate Limit).
+    """
+    max_retries = 2
+    retry_delay = 2  # Start with 2 seconds
 
-    # Check HTTP status
-    try:
-        r.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        ct = r.headers.get("Content-Type", "").lower()
-        return {"ok": False, "url": url, "error": "http_error", "status_code": r.status_code, "content_type": ct, "message": str(e)}
-
-    # Accept only HTML or JSON for crawling
-    ct = r.headers.get("Content-Type", "").lower()
-    if "html" in ct or "json" in ct:
+    for attempt in range(max_retries + 1):
+        start_time = time.time()
         try:
-            time.sleep(REQUEST_DELAY)
-        except Exception:
-            pass
-        return r
+            r = requests.get(
+                url,
+                timeout=REQUEST_TIMEOUT,
+                headers={"User-Agent": USER_AGENT},
+                verify=True,
+                allow_redirects=True,
+            )
 
-    return {"ok": False, "url": url, "error": "unsupported_content_type", "status_code": r.status_code, "content_type": ct}
+            fetch_time_ms = int((time.time() - start_time) * 1000)
+            response_size = len(r.content)
+            content_type = r.headers.get("Content-Type", "").lower()
+
+            if r.status_code == 429 and attempt < max_retries:
+                print(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Waiting {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+
+            if 200 <= r.status_code < 300:
+                if "text/html" in content_type or "application/json" in content_type:
+                    return {
+                        "success": True,
+                        "response": r,
+                        "fetch_time_ms": fetch_time_ms,
+                        "response_size": response_size,
+                        "content_type": content_type,
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"ignored content type: {content_type}",
+                        "content_type": content_type,
+                        "fetch_time_ms": fetch_time_ms,
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": f"http error: {r.status_code}",
+                    "content_type": content_type,
+                    "fetch_time_ms": fetch_time_ms,
+                }
+
+        except requests.exceptions.Timeout:
+            return {
+                "success": False,
+                "error": "timeout",
+                "content_type": "",
+                "fetch_time_ms": int((time.time() - start_time) * 1000),
+            }
+
+        except requests.exceptions.ConnectionError:
+            return {
+                "success": False,
+                "error": "connection error",
+                "content_type": "",
+                "fetch_time_ms": int((time.time() - start_time) * 1000),
+            }
+
+        except requests.exceptions.RequestException as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "content_type": "",
+                "fetch_time_ms": int((time.time() - start_time) * 1000),
+            }
+

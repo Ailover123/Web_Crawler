@@ -23,3 +23,9 @@ Thumbs.db
 
 # Ignore local Python bytecode
 *.pyc
+
+# Local Data and Logs
+logs/
+baselines/
+data_*.db
+export_*.json

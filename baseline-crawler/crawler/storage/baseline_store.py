@@ -1,81 +1,114 @@
-# #Baseline Storage
-# Responsibilities:
-# - persist trusted baseline fingerprints per URL
-# - retrieve baseline data for comparison
-# - update baselines only during baseline creation phase
+# crawler/storage/baseline_store.py
 
-import json
-from datetime import datetime, timezone
-from crawler.storage.db import get_connection
+from pathlib import Path
+from crawler.storage.db import insert_defacement_site
+from crawler.storage.mysql import upsert_baseline_hash, fetch_baseline_hash
 from crawler.normalizer import normalize_url
+from crawler.content_fingerprint import semantic_hash
 
-def now():
-  return datetime.now(timezone.utc).isoformat()
+import threading
 
-def store_baseline(url, html_hash, script_sources, script_count=None):
-  #Insert or update baseline for a URL.
-  # Normalize URL key so lookups are consistent
-  nurl = normalize_url(url)
-  # Persist script_sources and script_count together so callers can pass script_count
-  payload = {
-    'sources': script_sources or [],
-    'count': script_count or (len(script_sources) if script_sources else 0)
-  }
-  scripts_json = json.dumps(payload)
-  conn = get_connection()
-  cursor = conn.cursor()
-  cursor.execute("""
-  INSERT INTO baseline 
-  (url, html_hash, script_sources, baseline_created_at, baseline_updated_at)
-  VALUES (?, ?, ?, ?, ?)
-  ON CONFLICT(url) DO UPDATE SET
-  html_hash=excluded.html_hash,
-  script_sources=excluded.script_sources,
-  baseline_updated_at=excluded.baseline_updated_at;
-  """,
-  (nurl, html_hash, scripts_json, now(), now())
-  )
-  conn.commit()
-  cursor.close()
-  conn.close()
+BASELINE_ROOT = Path("baselines")
+
+# Global lock and cache for sequence numbers
+_ID_LOCK = threading.Lock()
+_SITE_MAX_IDS = {}
 
 
-def get_baseline(url):
-  #Retrieve baseline data for a URL.
-  conn = get_connection()
-  cursor = conn.cursor()
-  nurl = normalize_url(url)
-  cursor.execute("""
-  SELECT html_hash, script_sources FROM baseline WHERE url = ?""",
-  (nurl,)
-  )
+def _next_baseline_id(site_dir: Path, siteid: int) -> str:
+    """
+    Thread-safe generation of the next baseline ID.
+    Uses an in-memory cache to avoid O(N) disk scans on every write.
+    """
+    with _ID_LOCK:
+        if siteid not in _SITE_MAX_IDS:
+            max_seq = 0
+            prefix = f"{siteid}-"
+            
+            if site_dir.exists():
+                for f in site_dir.glob(f"{siteid}-*.html"):
+                    try:
+                        stem = f.stem
+                        if stem.startswith(prefix):
+                            num = int(stem[len(prefix):])
+                            if num > max_seq:
+                                max_seq = num
+                    except ValueError:
+                        pass
+            
+            _SITE_MAX_IDS[siteid] = max_seq
 
-  row = cursor.fetchone()
-  if row is None:
-    cursor.close()
-    conn.close()
-    return None
-  
-  else:
-    html_hash, scripts_json = row
-    parsed = json.loads(scripts_json) if scripts_json else {'sources': [], 'count': 0}
-    script_sources = parsed.get('sources', [])
-    script_count = parsed.get('count', 0)
-    cursor.close()
-    conn.close()
-    return {
-        "html_hash": html_hash,
-        "script_sources": script_sources,
-        "script_count": script_count
-    }
+        _SITE_MAX_IDS[siteid] += 1
+        return f"{siteid}-{_SITE_MAX_IDS[siteid]}"
 
-def baseline_exists(url):
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT 1 FROM baseline WHERE url = ? LIMIT 1",
-        (normalize_url(url),)
+
+def save_baseline(*, custid, siteid, url, html, base_url=None):
+    """
+    Creates or UPDATES baseline for a URL.
+    - Reuses existing baseline_id if present
+    - Creates a new baseline_id only once per URL
+    """
+
+    normalized_url = normalize_url(url, preference_url=base_url)
+
+    content_hash = semantic_hash(html)
+
+    # --------------------------------------------------
+    # 1️⃣ Check if baseline already exists for this URL
+    # --------------------------------------------------
+    existing = fetch_baseline_hash(
+        site_id=siteid,
+        normalized_url=normalized_url,
+        base_url=base_url,
     )
-    exists = cur.fetchone() is not None
-    conn.close()
-    return exists
+
+    site_dir = BASELINE_ROOT / str(custid) / str(siteid)
+    site_dir.mkdir(parents=True, exist_ok=True)
+
+    if existing and existing.get("baseline_path"):
+        # 🔁 UPDATE EXISTING BASELINE: reuse same file name and path
+        path = Path(existing["baseline_path"])
+        baseline_id = path.stem
+        # Ensure parent exists before overwrite
+        path.parent.mkdir(parents=True, exist_ok=True)
+        action = "updated"
+    else:
+        # 🆕 CREATE NEW BASELINE ID ONCE
+        baseline_id = _next_baseline_id(site_dir, siteid)
+        path = site_dir / f"{baseline_id}.html"
+        action = "created"
+
+    print(
+        f"[BASELINE] {action.upper()} baseline "
+        f"id={baseline_id} url={url}"
+    )
+
+    # --------------------------------------------------
+    # 2️⃣ UPSERT baseline record
+    # --------------------------------------------------
+    upsert_baseline_hash(
+        site_id=siteid,
+        normalized_url=normalized_url,
+        content_hash=content_hash,
+        baseline_path=str(path),
+        base_url=base_url,
+    )
+
+    # --------------------------------------------------
+    # 3️⃣ Overwrite the SAME file every time
+    # --------------------------------------------------
+    path.write_text(html.strip(), encoding="utf-8")
+
+    # --------------------------------------------------
+    # 4️⃣ Ensure defacement_sites points to SAME baseline_id
+    # --------------------------------------------------
+    insert_defacement_site(
+        siteid=siteid,
+        baseline_id=baseline_id,
+        url=url,
+        base_url=base_url,
+    )
+
+    return baseline_id, str(path), action
+
+

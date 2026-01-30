@@ -1,141 +1,178 @@
-#To remove needless noise from baseline data.
-# Input: parsed HTML structure
-# Process:
-#   - normalize tags
-#   - normalize attributes
-#   - clean whitespace
-# Output: stable string
+"""
+URL and HTML normalization utilities.
 
-def normalize_html(soup):
-  for tag in soup.find_all(True):
-      tag.name = tag.name.lower()
-# HTML tag names are case-insensitive; normalize to lowercase
-      if tag.attrs:
-         #Normalise class lists
-         if "class" in tag.attrs:
-          tag.attrs["class"] = sorted(tag.attrs["class"])
-          #Sort attributes
-         tag.attrs = dict(sorted(tag.attrs.items()))
-# Sort attributes to ensure consistent ordering so that string comparison are reliable
-  return str(soup)
+IMPORTANT:
+- normalize_url() → for FETCHING (network-safe)
+- get_canonical_id() → for DB identity (scheme-less, stable)
+- normalize_html() → ONLY for hashing / diffing
+"""
+
+from urllib.parse import urlparse, urlunparse, urljoin
+from bs4 import BeautifulSoup
 
 
-def normalize_url(url):
-  """Normalize URLs for enqueueing and DB keys.
+# ============================================================
+# URL NORMALIZATION (FOR FETCHING)
+# ============================================================
 
-  - Lowercase scheme and netloc
-  - Remove trailing slash except for bare domain (homepage)
-  - Strip params, query, fragment
-  """
-  from urllib.parse import urlparse, urlunparse
-  try:
-    p = urlparse(url)
-    scheme = p.scheme.lower()
-    netloc = p.netloc.lower()
-    # Remove trailing slash from path but keep single-root path as empty
-    path = p.path.rstrip('/')
-    normalized = urlunparse((scheme, netloc, path or '', '', '', ''))
+def normalize_url(
+    url: str,
+    *,
+    base: str | None = None,
+    preference_url: str | None = None,
+) -> str:
+    """
+    Normalize a URL for fetching.
+
+    Guarantees:
+    - Always returns a FULL URL with scheme
+    - Forces HTTPS
+    - Normalizes www/non-www to match preference_url if equivalent
+    - Removes trailing slash (except root)
+    """
+
+    if not url:
+        return ""
+
+    url = url.strip()
+
+    # If scheme missing but looks like domain/path
+    if "://" not in url and not url.startswith("/"):
+        url = "http://" + url
+
+    # Resolve relative URLs
+    if base:
+        url = urljoin(base, url)
+
+    parsed = urlparse(url)
+
+    # Force HTTPS
+    scheme = "https"
+    netloc = parsed.netloc.lower()
+
+    # Apply domain preference (www vs non-www)
+    if preference_url:
+        pref = urlparse(
+            preference_url
+            if "://" in preference_url
+            else "https://" + preference_url
+        )
+
+        clean_netloc = netloc.split(":")[0]
+        clean_pref = pref.netloc.lower().split(":")[0]
+
+        base_netloc = clean_netloc[4:] if clean_netloc.startswith("www.") else clean_netloc
+        base_pref = clean_pref[4:] if clean_pref.startswith("www.") else clean_pref
+
+        if base_netloc == base_pref:
+            netloc = pref.netloc.lower()
+
+    # Normalize path
+    path = parsed.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+
+    query = parsed.query
+
+    return urlunparse((
+        scheme,
+        netloc,
+        path,
+        "",
+        query,
+        ""
+    ))
+
+
+# ============================================================
+# CANONICAL DB ID (NO SCHEME)
+# ============================================================
+
+def get_canonical_id(url: str, base_url: str | None = None) -> str:
+    """
+    Returns a stable DB identifier: 'domain/path?query'
+
+    - Removes scheme
+    - Normalizes domain using base_url if provided
+    - Preserves path + query
+    """
+
+    if not url:
+        return ""
+
+    # First normalize fully
+    url = normalize_url(url, preference_url=base_url)
+    parsed = urlparse(url)
+
+    netloc = parsed.netloc.lower()
+
+    # Enforce base_url domain if equivalent
+    if base_url:
+        base_parsed = urlparse(
+            normalize_url(base_url)
+        )
+
+        clean_netloc = netloc[4:] if netloc.startswith("www.") else netloc
+        clean_base = (
+            base_parsed.netloc.lower()[4:]
+            if base_parsed.netloc.lower().startswith("www.")
+            else base_parsed.netloc.lower()
+        )
+
+        if clean_netloc == clean_base:
+            netloc = base_parsed.netloc.lower()
+
+    path = parsed.path.strip("/")
+    query = f"?{parsed.query}" if parsed.query else ""
+
+    if path:
+        return f"{netloc}/{path}{query}"
+    else:
+        return f"{netloc}{query}"
+
+
+# ============================================================
+# HTML NORMALIZATION (HASHING / DIFF ONLY)
+# ============================================================
+
+def normalize_html(html: str) -> str:
+    """
+    Normalize HTML ONLY for hashing / comparison.
+    Deterministic output.
+    """
+    if not html:
+        return ""
+
+    soup = BeautifulSoup(html, "lxml")
+
+    # Remove noisy tags
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    # Normalize whitespace
+    normalized = soup.prettify()
+    normalized = "\n".join(
+        line.strip()
+        for line in normalized.splitlines()
+        if line.strip()
+    )
+
     return normalized
-  except Exception:
-    return url
 
 
-def strip_trivial_comments(html_text):
-  """Remove HTML comments that are known to be cache/footprint noise.
+# ============================================================
+# JS RENDER NORMALIZATION (DISPLAY ONLY)
+# ============================================================
 
-  This strips comments like LiteSpeed Cache footers and timestamps which
-  frequently change between requests but do not indicate content defacement.
-  The removal is done by regex and returns the cleaned HTML string.
-  """
-  import re
-  if not html_text:
-    return html_text
-  patterns = [
-    r'<!--\s*Page supported by LiteSpeed Cache.*?-->',
-    r'<!--\s*LSCACHE:.*?-->',
-    r'<!--\s*Cached page generated by.*?-->',
-    r'<!--\s*Cache created at.*?-->',
-  ]
-  out = html_text
-  for pat in patterns:
-    try:
-      out = re.sub(pat, '', out, flags=re.I | re.S)
-    except Exception:
-      continue
-  return out
+def normalize_rendered_html(html: str) -> str:
+    """
+    Cleanup for JS-rendered HTML.
+    NOT used for hashing.
+    """
+    if not html:
+        return ""
 
+    if "\\n" in html:
+        html = html.replace("\\n", "\n")
 
-def semantic_normalize_html(html_text):
-  """Perform semantic normalization on HTML text before hashing.
-
-  - Collapse whitespace
-  - Normalize punctuation spacing
-  - Canonicalize short comma-separated lists by sorting tokens (helps
-    with location strings like "Dubai, Middle East, UAE" vs "Middle East, UAE, Dubai").
-  """
-  from bs4 import BeautifulSoup
-  import re
-  if not html_text:
-    return html_text
-  try:
-    soup = BeautifulSoup(html_text, 'html.parser')
-    # Iterate over text nodes and normalize
-    for element in soup.find_all(text=True):
-      # Skip scripts and styles
-      if element.parent.name in ['script', 'style', 'noscript']:
-        continue
-      text = str(element)
-      # Collapse whitespace
-      t = re.sub(r'\s+', ' ', text).strip()
-      # Normalize punctuation spacing (remove space before comma, ensure single space after)
-      t = re.sub(r'\s*,\s*', ', ', t)
-      # Canonicalize short comma-separated lists
-      if ',' in t:
-        parts = [p.strip() for p in t.split(',') if p.strip()]
-        # Heuristic: only canonicalize when parts are short (<=5 words each) and few parts
-        if 1 < len(parts) <= 6 and all(len(p.split()) <= 5 for p in parts):
-          # Sort tokens case-insensitively to create canonical order
-          try:
-            sorted_parts = sorted(parts, key=lambda s: s.lower())
-            t = ', '.join(sorted_parts)
-          except Exception:
-            pass
-      # Replace text node only if changed
-      if t != text:
-        try:
-          element.replace_with(t)
-        except Exception:
-          pass
-    return str(soup)
-  except Exception:
-    # If parsing fails, fall back to whitespace/punctuation normalization on raw text
-    import re
-    out = re.sub(r'\s+', ' ', html_text).strip()
-    out = re.sub(r'\s*,\s*', ', ', out)
-    return out
-
-
-def dom_structure_fingerprint(html_text):
-  """Generate a lightweight DOM structure fingerprint: set of tag paths and counts.
-
-  This is used to detect node additions/removals without performing expensive diffing.
-  """
-  from bs4 import BeautifulSoup
-  if not html_text:
-    return None
-  try:
-    soup = BeautifulSoup(html_text, 'html.parser')
-    paths = []
-    def walk(node, path=''):
-      for child in node.children:
-        if getattr(child, 'name', None):
-          tag = child.name.lower()
-          newpath = f"{path}/{tag}"
-          paths.append(newpath)
-          walk(child, newpath)
-    walk(soup, '')
-    # Return a sorted tuple so comparisons are deterministic
-    return tuple(sorted(paths))
-  except Exception:
-    return None
-
+    return html.strip()

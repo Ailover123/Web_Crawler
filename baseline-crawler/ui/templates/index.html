@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crawl Observability UI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Crawl Observability Dashboard</h1>
+
+        <div class="section">
+            <h2>Domain Selection</h2>
+            <select id="domain-select" title="Select a domain to view its crawl data">
+                <option value="">Select Domain</option>
+            </select>
+        </div>
+
+        <div class="section">
+            <h2>Domain Distribution</h2>
+            <div id="distribution-view" class="scrollable">
+                <!-- Distribution data will be loaded here -->
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Routing Tree</h2>
+            <div id="routing-tree" class="scrollable">
+                <!-- Routing tree will be loaded here -->
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>URL Details</h2>
+            <div id="url-details">
+                <!-- URL details will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Load domains on page load
+        fetch('/api/domains')
+            .then(response => response.json())
+            .then(domains => {
+                const select = document.getElementById('domain-select');
+                domains.forEach(domain => {
+                    const option = document.createElement('option');
+                    option.value = domain;
+                    option.textContent = domain;
+                    select.appendChild(option);
+                });
+            });
+
+        // Handle domain selection
+        document.getElementById('domain-select').addEventListener('change', function() {
+            const domain = this.value;
+            if (domain) {
+                fetch(`/api/domain/${domain}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        displayDomainData(data);
+                    });
+            }
+        });
+
+        function displayDomainData(data) {
+            // Update distribution view
+            const distributionView = document.getElementById('distribution-view');
+            distributionView.innerHTML = '<h3>URL Types Distribution</h3>';
+            for (const [type, info] of Object.entries(data.types_summary)) {
+                distributionView.innerHTML += `<p>${type}: ${info.count} URLs</p>`;
+            }
+
+            // Update routing tree (simplified)
+            const routingTree = document.getElementById('routing-tree');
+            routingTree.innerHTML = '<h3>Routing Graph</h3><p>Routing graph visualization would go here.</p>';
+
+            // Update URL details
+            const urlDetails = document.getElementById('url-details');
+            urlDetails.innerHTML = '<h3>URL Details</h3>';
+            for (const [type, info] of Object.entries(data.types_summary)) {
+                urlDetails.innerHTML += `<h4>${type}</h4>`;
+                info.urls.slice(0, 5).forEach(url => {
+                    urlDetails.innerHTML += `<p>${url.sr}. ${url.url}</p>`;
+                });
+            }
+        }
+    </script>
+</body>
+</html>
