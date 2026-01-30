@@ -10,7 +10,9 @@ load_dotenv()
 import time
 import uuid
 import os
+import os
 import requests
+import argparse # Added argparse
 
 from crawler.frontier import Frontier
 from crawler.worker import Worker
@@ -22,6 +24,7 @@ from crawler.storage.db import (
     complete_crawl_job,
     fail_crawl_job,
 )
+from crawler.storage.mysql import fetch_site_info_by_baseline_id # Added import
 from crawler.baseline_worker import BaselineWorker
 
 from crawler.worker import BLOCK_REPORT
@@ -76,6 +79,13 @@ def resolve_seed_url(raw_url: str) -> str:
 # ============================================================
 
 def main():
+
+    # ---------------- ARG PARSE ----------------
+    parser = argparse.ArgumentParser(description="Defacement Crawler / Baseline Tool")
+    parser.add_argument("--siteid", type=int, help="Run only for this specific SITE ID")
+    parser.add_argument("--baseline_id", type=str, help="Run only for this specific BASELINE ID")
+    args = parser.parse_args()
+
     # ---------------- DB CHECK ----------------
     if not check_db_health():
         print("ERROR: MySQL health check failed.")
@@ -88,7 +98,31 @@ def main():
         print("No enabled sites found.")
         return
 
-    print(f"Found {len(sites)} enabled site(s).")
+
+    # ---------------- FILTER SITES ----------------
+    
+    target_urls = None
+    target_siteid = args.siteid
+
+    # If baseline_id provided, it overrides siteid and sets specific target
+    if args.baseline_id:
+        info = fetch_site_info_by_baseline_id(args.baseline_id)
+        if not info:
+             print(f"ERROR: Baseline ID '{args.baseline_id}' not found in defacement_sites.")
+             return
+        target_siteid = info["siteid"]
+        target_urls = [info["url"]]
+        print(f"--> Targeting specific Baseline ID: {args.baseline_id} (Site {target_siteid})")
+
+    if target_siteid:
+        # Filter the list of sites
+        sites = [s for s in sites if s["siteid"] == target_siteid]
+        if not sites:
+            print(f"Site ID {target_siteid} not found or not enabled.")
+            return
+        print(f"Filtered to single site ID: {target_siteid}")
+
+    print(f"Found {len(sites)} enabled site(s) to process.")
 
     # ---------------- PER SITE ----------------
     for site in sites:
@@ -132,6 +166,7 @@ def main():
                     custid=custid,
                     siteid=siteid,
                     seed_url=start_url,
+                    target_urls=target_urls, # Pass the filter
                 ).run()
 
                 duration = time.time() - start_time
