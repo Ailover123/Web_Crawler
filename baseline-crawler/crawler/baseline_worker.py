@@ -7,15 +7,20 @@ from crawler.normalizer import normalize_url
 
 
 class BaselineWorker:
-    def __init__(self, *, custid, siteid, seed_url):
+    def __init__(self, *, custid, siteid, seed_url, target_urls=None):
         self.custid = custid
         self.siteid = siteid
         self.seed_url = seed_url
+        self.target_urls = target_urls
 
     def run(self):
         print("[BASELINE] Controlled baseline refetch started")
 
-        urls = iter_crawl_urls(siteid=self.siteid)
+        if self.target_urls:
+             print(f"[BASELINE] Targeting {len(self.target_urls)} specific URL(s).")
+             urls = self.target_urls
+        else:
+            urls = iter_crawl_urls(siteid=self.siteid)
 
         # ✅ NEW LOG
         if not urls:
