@@ -10,6 +10,7 @@ load_dotenv()
 
 import argparse
 import logging
+import threading
 import time
 import uuid
 import os
@@ -32,7 +33,7 @@ from crawler.storage.db import (
 
 from crawler.logger import logger
 
-from crawler.worker import BLOCK_REPORT
+# from crawler.worker import BLOCK_REPORT
 #from crawler.compare_engine import DEFACEMENT_REPORT
 
 CRAWL_MODE = os.getenv("CRAWL_MODE", "CRAWL").upper()
@@ -106,22 +107,19 @@ def crawl_site(site, args):
 
     job_id = str(uuid.uuid4())
     
-    # Setup job logging if requested
+    # Site-local metrics for thread-safety in parallel mode
+    from collections import defaultdict
+    site_block_report = defaultdict(lambda: {"count": 0, "urls": []})
+    site_block_lock = threading.Lock()
+
     job_logger = logger
-    file_handler = None
-    if args.log:
-        log_dir = "logs"
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"crawl_{siteid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        job_logger.addHandler(file_handler)
 
     job_logger.info("=" * 60)
     job_logger.info(f"Starting crawl job {job_id}")
-    job_logger.info(f"Customer ID : {custid}")
-    job_logger.info(f"Site ID     : {siteid}")
-    job_logger.info(f"Seed URL    : {start_url}")
+    job_logger.info(f"Customer ID    : {custid}")
+    job_logger.info(f"Site ID        : {siteid}")
+    job_logger.info(f"Registered URL : {site['url']}")
+    job_logger.info(f"Starting URL   : {start_url}")
     job_logger.info("=" * 60)
 
     try:
@@ -181,7 +179,9 @@ def crawl_site(site, args):
                 siteid_map=siteid_map,
                 job_id=job_id,
                 crawl_mode=CRAWL_MODE,
-                seed_url=site["url"],
+                seed_url=start_url, 
+                block_report=site_block_report,
+                block_lock=site_block_lock,
             )
             w.start()
             workers.append(w)
@@ -197,19 +197,35 @@ def crawl_site(site, args):
         complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
 
         total_saved = sum(w.saved_count for w in workers)
+        total_db_updates = sum(w.duplicate_count for w in workers)
+        total_failed = sum(w.failed_count for w in workers)
+        total_policy_skipped = sum(w.policy_skipped_count for w in workers)
+        total_frontier_skips = sum(w.frontier_duplicate_count for w in workers)
+        total_blocked = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_block_report.values())
+        
+        # Total Duplicates = DB Updates + Frontier Skips
+        total_duplicates = total_db_updates + total_frontier_skips
+        
+        # Total Visited = Crawled + Duplicates + Blocked + Failed + Policy Skips
+        total_visited = total_saved + total_duplicates + total_blocked + total_failed + total_policy_skipped
+
         job_logger.info("-" * 60)
         job_logger.info(f"CRAWL COMPLETED FOR SITE {siteid}")
         job_logger.info(f"Total URLs Crawled: {total_saved}")
+        job_logger.info(f"Total URLs Visited: {total_visited}")
+        job_logger.info(f"Duplicates Skipped: {total_duplicates}")
+        job_logger.info(f" (Frontier Skips) : {total_frontier_skips}")
+        job_logger.info(f" (DB Updates)     : {total_db_updates}")
+        job_logger.info(f"Policy Skipped    : {total_policy_skipped}")
+        job_logger.info(f"URLs Blocked      : {total_blocked}")
+        job_logger.info(f"URLs Failed       : {total_failed}")
         job_logger.info(f"Crawl duration    : {duration:.2f} seconds")
+        job_logger.info(f"Workers used      : {len(workers)}")
         job_logger.info("-" * 60)
 
     except Exception as e:
         fail_crawl_job(job_id, str(e))
         job_logger.error(f"Crawl job {job_id} failed: {e}")
-    finally:
-        if file_handler:
-            job_logger.removeHandler(file_handler)
-            file_handler.close()
 
 def main():
     parser = argparse.ArgumentParser(description="Web Crawler Entry Point")
@@ -243,15 +259,35 @@ def main():
 
     logger.info(f"Processing {len(sites)} site(s).")
 
+    # LOGGING SETUP
+    file_handler = None
+    if args.log:
+        log_dir = "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        # Format: CRAWL_MODE_YYYY-MM-DD_HHMMSS.log
+        log_filename = f"{CRAWL_MODE}_{datetime.now().strftime('%Y-%m-%d_%HH%MM%SS')}.log"
+        log_path = os.path.join(log_dir, log_filename)
+        
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+        logger.info(f"--- Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+
     # ---------------- EXECUTION ----------------
-    if args.parallel:
-        max_parallel_sites = int(os.getenv("MAX_PARALLEL_SITES", 3))
-        logger.info(f"Parallel mode enabled (max {max_parallel_sites} sites at once).")
-        with ThreadPoolExecutor(max_workers=max_parallel_sites) as executor:
-            executor.map(lambda s: crawl_site(s, args), sites)
-    else:
-        for site in sites:
-            crawl_site(site, args)
+    try:
+        if args.parallel:
+            max_parallel_sites = int(os.getenv("MAX_PARALLEL_SITES", 3))
+            logger.info(f"Parallel mode enabled (max {max_parallel_sites} sites at once).")
+            with ThreadPoolExecutor(max_workers=max_parallel_sites) as executor:
+                list(executor.map(lambda s: crawl_site(s, args), sites))
+        else:
+            for site in sites:
+                crawl_site(site, args)
+    finally:
+        if file_handler:
+            logger.info(f"--- Session ended: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+            logger.removeHandler(file_handler)
+            file_handler.close()
 
     logger.info("All site crawls processed successfully.")
 
@@ -263,29 +299,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-    if BLOCK_REPORT:
-        logger.info("=" * 60)
-        logger.info("BLOCKED URL REPORT")
-        logger.info("=" * 60)
-        for block_type, data in BLOCK_REPORT.items():
-            # New format: dict with 'count' and 'urls'; keep backward compatibility
-            if isinstance(data, dict) and "count" in data:
-                count = data.get("count", 0)
-                urls = data.get("urls", [])
-            elif isinstance(data, int):
-                count = data
-                urls = []
-            else:
-                # fallback for list-like
-                try:
-                    count = len(data)
-                except Exception:
-                    count = 0
-                urls = list(data) if hasattr(data, '__iter__') else []
-
-            logger.info(f"[{block_type}] {count} URLs blocked")
-            if urls:
-                for u in urls:
-                    logger.info(f"  - {u}")
-        logger.info("=" * 60)
-        logger.info("=" * 60)
+    logger.info("All site crawls processed successfully.")

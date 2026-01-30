@@ -53,8 +53,7 @@ STATIC_EXTENSIONS = (
     ".ppt", ".pptx", ".mp3"
 )
 
-BLOCK_REPORT = defaultdict(lambda: {"count": 0, "urls": []})
-BLOCK_LOCK = threading.Lock()
+# Removed global BLOCK_REPORT to support site isolation
 
 
 def classify_block(url: str):
@@ -123,6 +122,8 @@ class Worker(threading.Thread):
         job_id,
         crawl_mode,
         seed_url,
+        block_report=None,
+        block_lock=None,
     ):
         super().__init__(name=name)
         self.frontier = frontier
@@ -132,6 +133,8 @@ class Worker(threading.Thread):
         self.job_id = job_id
         self.crawl_mode = crawl_mode
         self.seed_url = seed_url
+        self.block_report = block_report if block_report is not None else defaultdict(lambda: {"count": 0, "urls": []})
+        self.block_lock = block_lock if block_lock is not None else threading.Lock()
 
         self.compare_engine = (
             CompareEngine(custid=self.custid)
@@ -337,17 +340,19 @@ class Worker(threading.Thread):
                 for u in urls:
                     block_type = classify_block(u)
                     if block_type:
-                        with BLOCK_LOCK:
-                            BLOCK_REPORT[block_type]["count"] += 1
-                            BLOCK_REPORT[block_type]["urls"].append(u)
+                        with self.block_lock:
+                            self.block_report[block_type]["count"] += 1
+                            if len(self.block_report[block_type]["urls"]) < 5:
+                                self.block_report[block_type]["urls"].append(u)
                         blocked_rule_count += 1
                         continue
 
                     # Allow domain change if it's the destination of the seed OR matches seed domain
                     if not _allowed_domain(self.seed_url, u, current_url=final_url):
-                        with BLOCK_LOCK:
-                            BLOCK_REPORT["DOMAIN_FILTER"]["count"] += 1
-                            BLOCK_REPORT["DOMAIN_FILTER"]["urls"].append(u)
+                        with self.block_lock:
+                            self.block_report["DOMAIN_FILTER"]["count"] += 1
+                            if len(self.block_report["DOMAIN_FILTER"]["urls"]) < 5:
+                                self.block_report["DOMAIN_FILTER"]["urls"].append(u)
                         blocked_domain_count += 1
                         continue
 
