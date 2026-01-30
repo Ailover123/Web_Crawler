@@ -118,9 +118,9 @@ The Frontier manages the "To-Be-Crawled" list:
 
 | File | Function | Logic & Implementation |
 | :--- | :--- | :--- |
-| `main.py` | `resolve_seed_url` | Redirect-aware seed validation. |
-| `worker.py` | `run` | Core execution loop (Fetch -> Parse -> Store). |
-| `fetcher.py` | `fetch` | HTTP Get with Exponential Backoff (5s base). |
-| `parser.py` | `extract_urls` | BeautifulSoup extraction with Protocol Doubling fix. |
-| `frontier.py` | `enqueue` | Thread-safe deduplication and 10k queue management. |
-| `mysql.py` | `insert_crawl_page` | Upsert logic with IST-synchronized timestamps. |
+| `main.py` | `resolve_seed_url` | Tries URL variants (with/without trailing slash) and returns the final destination after redirects. |
+| `worker.py` | `run` | Main thread loop: `dequeue` -> `wait` -> `fetch` -> `store` -> `parse` -> `enqueue`. |
+| `fetcher.py` | `fetch` | Executes `requests.get` with exponential backoff (waits `retry_delay` on 429 errors). |
+| `parser.py` | `extract_urls` | Uses BeautifulSoup to find `<a>` and asset tags. Applies the **Doubling Fix** for malformed protocols. |
+| `frontier.py` | `enqueue` | Normalizes the URL, checks the `visited` set, and thread-safely pushes to the `Queue`. |
+| `mysql.py` | `insert_crawl_page` | Uses `INSERT ... ON DUPLICATE KEY UPDATE` to track page visits with IST timelines. |
