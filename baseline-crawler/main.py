@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-Entry point for the web crawler.
-Uses queue.join() for deterministic crawl completion.
+Entry point for the web crawler and baseline generator.
 """
 
-import site
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -30,11 +28,10 @@ from crawler.storage.db import (
     complete_crawl_job,
     fail_crawl_job,
 )
-
+from crawler.storage.mysql import fetch_site_info_by_baseline_id
+from crawler.baseline_worker import BaselineWorker
+from crawler.worker import BLOCK_REPORT
 from crawler.logger import logger
-
-# from crawler.worker import BLOCK_REPORT
-#from crawler.compare_engine import DEFACEMENT_REPORT
 
 CRAWL_MODE = os.getenv("CRAWL_MODE", "CRAWL").upper()
 assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE")
@@ -45,62 +42,61 @@ SCALE_THRESHOLD = 100
 
 
 # ============================================================
-# SEED URL RESOLUTION (CRITICAL FIX)
+# SEED URL RESOLUTION
 # ============================================================
 
 def resolve_seed_url(raw_url: str) -> str:
     """
-    Resolve the correct root URL for crawling.
-
-    Tries:
-      1) without trailing slash
-      2) with trailing slash
-
-    Locks the first variant that responds successfully.
+    Resolve a working URL for crawling.
+    This does NOT change DB identity.
     """
     raw = raw_url.strip()
 
-    if raw.endswith("/"):
-        candidates = [raw.rstrip("/"), raw]
-    else:
-        candidates = [raw, raw + "/"]
+    # Try without / and with /
+    candidates = (
+        [raw.rstrip("/"), raw]
+        if raw.endswith("/")
+        else [raw, raw + "/"]
+    )
 
     for u in candidates:
         try:
             r = requests.get(
-                u,
+                u if u.startswith(("http://", "https://")) else "https://" + u,
                 timeout=12,
                 allow_redirects=True,
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"},
                 verify=False,
             )
             if r.status_code < 400:
-                # lock final resolved URL
                 return r.url
         except Exception:
             continue
 
-    # fallback: ensure scheme is present
+    # Last-resort fallback
     if not raw.startswith(("http://", "https://")):
         raw = "https://" + raw
     return raw
 
 
 # ============================================================
-# MAIN
+# PER-SITE CRAWL LOGIC
 # ============================================================
 
-def crawl_site(site, args):
+def crawl_site(site, args, target_urls=None):
     """
     Crawls a single site. This function can be called sequentially or in parallel.
     """
     siteid = site["siteid"]
     custid = site["custid"]
 
+    # 🔒 EXACT value from sites table (DB identity)
+    original_site_url = site["url"].strip()
+
     # 🔑 Resolve seed FIRST, normalize AFTER
     from crawler.url_utils import canonicalize_seed, force_www_url
 
-    resolved_seed = resolve_seed_url(site["url"])
+    resolved_seed = resolve_seed_url(original_site_url)
     
     # Force www for fetch/start
     start_url = force_www_url(canonicalize_seed(resolved_seed))
@@ -115,10 +111,10 @@ def crawl_site(site, args):
     job_logger = logger
 
     job_logger.info("=" * 60)
-    job_logger.info(f"Starting crawl job {job_id}")
+    job_logger.info(f"Starting job {job_id} ({CRAWL_MODE})")
     job_logger.info(f"Customer ID    : {custid}")
     job_logger.info(f"Site ID        : {siteid}")
-    job_logger.info(f"Registered URL : {site['url']}")
+    job_logger.info(f"Registered URL : {original_site_url}")
     job_logger.info(f"Starting URL   : {start_url}")
     job_logger.info("=" * 60)
 
@@ -127,24 +123,25 @@ def crawl_site(site, args):
             job_id=job_id,
             custid=custid,
             siteid=siteid,
-            start_url=start_url,
+            start_url=original_site_url,
         )
+
+        start_time = time.time()
 
         # ====================================================
         # BASELINE MODE (REFETCH FROM DB)
         # ====================================================
         if CRAWL_MODE == "BASELINE":
-            from crawler.baseline_worker import BaselineWorker
             job_logger.info(f"[MODE] BASELINE (offline refetch from DB for siteid={siteid})")
 
-            start_time = time.time()
             stats = BaselineWorker(
                 custid=custid,
                 siteid=siteid,
                 seed_url=start_url,
+                target_urls=target_urls,
             ).run()
 
-            # 🛡️ Safety: Ensure stats is always a dictionary to avoid 'NoneType' errors
+            # 🛡️ Safety: Ensure stats is always a dictionary
             if stats is None:
                 stats = {"created": 0, "updated": 0, "failed": 0}
 
@@ -165,10 +162,9 @@ def crawl_site(site, args):
         # CRAWL / COMPARE MODE (LIVE DISCOVERY)
         # ====================================================
         frontier = Frontier()
-        frontier.enqueue(start_url, None, 0, preference_url=site["url"])
+        frontier.enqueue(start_url, None, 0, preference_url=original_site_url)
 
         workers = []
-        start_time = time.time()
         siteid_map = {siteid: siteid}
 
         for i in range(INITIAL_WORKERS):
@@ -180,6 +176,7 @@ def crawl_site(site, args):
                 job_id=job_id,
                 crawl_mode=CRAWL_MODE,
                 seed_url=start_url, 
+                original_site_url=original_site_url,
                 block_report=site_block_report,
                 block_lock=site_block_lock,
             )
@@ -196,11 +193,11 @@ def crawl_site(site, args):
         stats = frontier.get_stats()
         complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
 
-        total_saved = sum(w.saved_count for w in workers)
-        total_db_updates = sum(w.duplicate_count for w in workers)
-        total_failed = sum(w.failed_count for w in workers)
-        total_policy_skipped = sum(w.policy_skipped_count for w in workers)
-        total_frontier_skips = sum(w.frontier_duplicate_count for w in workers)
+        total_saved = sum(getattr(w, 'saved_count', 0) for w in workers)
+        total_db_updates = sum(getattr(w, 'duplicate_count', 0) for w in workers)
+        total_failed = sum(getattr(w, 'failed_count', 0) for w in workers)
+        total_policy_skipped = sum(getattr(w, 'policy_skipped_count', 0) for w in workers)
+        total_frontier_skips = sum(getattr(w, 'frontier_duplicate_count', 0) for w in workers)
         total_blocked = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_block_report.values())
         
         # Total Duplicates = DB Updates + Frontier Skips
@@ -226,11 +223,19 @@ def crawl_site(site, args):
     except Exception as e:
         fail_crawl_job(job_id, str(e))
         job_logger.error(f"Crawl job {job_id} failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Web Crawler Entry Point")
+    parser = argparse.ArgumentParser(description="Web Crawler / Baseline Tool")
     parser.add_argument("--siteid", type=int, nargs='+', help="Crawl one or more specific Site IDs")
     parser.add_argument("--custid", type=int, nargs='+', help="Crawl all sites for one or more specific Customer IDs")
+    parser.add_argument("--baseline_id", type=str, help="Run only for this specific BASELINE ID")
     parser.add_argument("--parallel", action="store_true", help="Crawl multiple sites in parallel")
     parser.add_argument("--log", action="store_true", help="Enable file logging for each job")
     args = parser.parse_args()
@@ -247,25 +252,36 @@ def main():
         logger.info("No enabled sites found.")
         return
 
-    # Filter sites based on arguments
-    if args.siteid:
-        sites = [s for s in sites if s["siteid"] in args.siteid]
-    if args.custid:
-        sites = [s for s in sites if s["custid"] in args.custid]
+    # ---------------- FILTER SITES ----------------
+    target_urls = None
+    
+    if args.baseline_id:
+        info = fetch_site_info_by_baseline_id(args.baseline_id)
+        if not info:
+             logger.error(f"Baseline ID '{args.baseline_id}' not found in defacement_sites.")
+             return
+        target_siteid = info["siteid"]
+        target_urls = [info["url"]]
+        sites = [s for s in sites if s["siteid"] == target_siteid]
+        logger.info(f"--> Targeting specific Baseline ID: {args.baseline_id} (Site {target_siteid})")
+    else:
+        if args.siteid:
+            sites = [s for s in sites if s["siteid"] in args.siteid]
+        if args.custid:
+            sites = [s for s in sites if s["custid"] in args.custid]
 
     if not sites:
         logger.info("No sites matched the specified filters.")
         return
 
-    logger.info(f"Processing {len(sites)} site(s).")
+    logger.info(f"Found {len(sites)} enabled site(s) to process.")
 
     # LOGGING SETUP
     file_handler = None
     if args.log:
         log_dir = "logs"
         os.makedirs(log_dir, exist_ok=True)
-        # Format: CRAWL_MODE_YYYY-MM-DD_HHMMSS.log
-        log_filename = f"{CRAWL_MODE}_{datetime.now().strftime('%Y-%m-%d_%HH%MM%SS')}.log"
+        log_filename = f"{CRAWL_MODE}_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.log"
         log_path = os.path.join(log_dir, log_filename)
         
         file_handler = logging.FileHandler(log_path)
@@ -279,10 +295,10 @@ def main():
             max_parallel_sites = int(os.getenv("MAX_PARALLEL_SITES", 3))
             logger.info(f"Parallel mode enabled (max {max_parallel_sites} sites at once).")
             with ThreadPoolExecutor(max_workers=max_parallel_sites) as executor:
-                list(executor.map(lambda s: crawl_site(s, args), sites))
+                list(executor.map(lambda s: crawl_site(s, args, target_urls), sites))
         else:
             for site in sites:
-                crawl_site(site, args)
+                crawl_site(site, args, target_urls)
     finally:
         if file_handler:
             logger.info(f"--- Session ended: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
@@ -299,4 +315,19 @@ def main():
 if __name__ == "__main__":
     main()
 
-    logger.info("All site crawls processed successfully.")
+    if BLOCK_REPORT:
+        print("\n" + "=" * 60)
+        print("GLOBAL BLOCKED URL REPORT")
+        print("=" * 60)
+        for block_type, data in BLOCK_REPORT.items():
+            try:
+                count = len(data.get("urls", []))
+                urls = data.get("urls", [])
+            except Exception:
+                count = 0
+                urls = []
+
+            print(f"[{block_type}] {count} URLs blocked")
+            for u in urls[:10]: # Limit print for brevity
+                print(f"  - {u}")
+        print("=" * 60)

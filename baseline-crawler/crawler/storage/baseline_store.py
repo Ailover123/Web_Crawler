@@ -57,33 +57,44 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
     """
     Creates or UPDATES baseline for a URL.
     - Reuses existing baseline_id if present
-    - Unconditional update (as requested)
+    - Creates a new baseline_id only once per URL
     """
+
     normalized_url = normalize_url(url, preference_url=base_url)
     content_hash = semantic_hash(html)
 
+    content_hash = semantic_hash(html)
+
     # 1. Check for existing record
+    # --------------------------------------------------
+    # 1️⃣ Check if baseline already exists for this URL
+    # --------------------------------------------------
     existing = fetch_baseline_hash(
         site_id=siteid,
         normalized_url=normalized_url,
-        base_url=base_url
+        base_url=base_url,
     )
 
     site_dir = BASELINE_ROOT / str(custid) / str(siteid)
     site_dir.mkdir(parents=True, exist_ok=True)
 
     if existing and existing.get("baseline_path"):
-        # REUSE EXISTING ID
+        # 🔁 UPDATE EXISTING BASELINE: reuse same file name and path
         path = Path(existing["baseline_path"])
         baseline_id = path.stem
+        # Ensure parent exists before overwrite
+        path.parent.mkdir(parents=True, exist_ok=True)
         action = "updated"
     else:
-        # GENERATE NEW SEQUENTIAL ID
-        baseline_id = _get_next_sequence_id(siteid)
+        # 🆕 CREATE NEW BASELINE ID ONCE
+        baseline_id = _next_baseline_id(site_dir, siteid)
         path = site_dir / f"{baseline_id}.html"
         action = "created"
 
-    logger.info(f"[BASELINE] {action.upper()} baseline for {url} with ID {baseline_id}")
+    print(
+        f"[BASELINE] {action.upper()} baseline "
+        f"id={baseline_id} url={url}"
+    )
 
     # 2. Update Database (Always)
     upsert_baseline_hash(
@@ -95,9 +106,15 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
     )
 
     # 3. Write File
+    # --------------------------------------------------
+    # 3️⃣ Overwrite the SAME file every time
+    # --------------------------------------------------
     path.write_text(html.strip(), encoding="utf-8")
 
     # 4. Link to Defacement Site
+    # --------------------------------------------------
+    # 4️⃣ Ensure defacement_sites points to SAME baseline_id
+    # --------------------------------------------------
     insert_defacement_site(
         siteid=siteid,
         baseline_id=baseline_id,

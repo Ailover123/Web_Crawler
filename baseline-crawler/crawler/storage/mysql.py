@@ -215,10 +215,8 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
 
 def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, base_url=None):
     """
-    Baseline pages are INSERTED ONCE and NEVER UPDATED from the crawler.
-    Uses INSERT IGNORE to protect existing baselines.
-    Returns:
-        bool: True if inserted, False if duplicate/ignored.
+    Insert or UPDATE baseline for a URL.
+    Always keeps the latest baseline.
     """
     canonical_url = get_canonical_id(normalized_url, base_url)
     if not canonical_url:
@@ -240,11 +238,12 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
             (site_id, canonical_url, content_hash, baseline_path),
         )
         conn.commit()
-        return cur.rowcount > 0
+        return True
     finally:
         cur.close()
         conn.close()
         DB_SEMAPHORE.release()
+
 
 
 def fetch_baseline_hash(site_id, normalized_url, base_url=None):
@@ -260,6 +259,25 @@ def fetch_baseline_hash(site_id, normalized_url, base_url=None):
             WHERE site_id=%s AND normalized_url=%s
             """,
             (site_id, canonical_url),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+        DB_SEMAPHORE.release()
+
+
+def fetch_site_info_by_baseline_id(baseline_id):
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT siteid, url
+            FROM defacement_sites
+            WHERE baseline_id=%s
+            """,
+            (baseline_id,),
         )
         return cur.fetchone()
     finally:
