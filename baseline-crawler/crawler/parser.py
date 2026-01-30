@@ -4,6 +4,7 @@
 # Output: Extracted URLs and assets from HTML pages.
 # Notes: Extracts navigational URLs and assets, classifies URLs into types.
 
+import tldextract
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -108,16 +109,17 @@ def extract_urls(html, base_url):
 
 def _is_allowed_url(url, base_domain):
     """
-    Allow only http/https and restrict to the same registrable host,
-    treating `www.` and non-`www` as equivalent. This prevents the
-    common case where the seed is `example.com` but links are
-    `www.example.com` (or vice versa) from being excluded.
+    Allow only http/https and restrict to the same registrable host.
+    Uses tldextract to ensure example.com, www.example.com, and sub.example.com
+    are all treated as the same domain if the registrable domain matches.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return False
 
-    cand = parsed.netloc.lower().split(":")[0]
-    base = base_domain.lower().split(":")[0]
+    cand_ext = tldextract.extract(url)
+    base_ext = tldextract.extract(f"http://{base_domain}") # ensure it has a scheme for tldextract
 
-    return cand == base
+    # Check if the registrable domain (domain + suffix) matches
+    # e.g. 'hocco.in' == 'hocco.in'
+    return cand_ext.registered_domain == base_ext.registered_domain

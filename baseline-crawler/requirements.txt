@@ -4,3 +4,5 @@ requests
 mysql-connector-python
 python-dotenv
 playwright
+tldextract
+psutil
