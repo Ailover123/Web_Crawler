@@ -36,12 +36,12 @@ class Frontier:
         self.lock = Lock()
 
     # ---------------- ENQUEUE ----------------
-    def enqueue(self, url, discovered_from=None, depth=0) -> bool:
+    def enqueue(self, url, discovered_from=None, depth=0, preference_url=None) -> bool:
         with self.lock:
             if not should_enqueue(url):
                 return False
 
-            normalized = normalize_url(url)
+            normalized = normalize_url(url, preference_url=preference_url)
 
             if normalized in self.visited or normalized in self.in_progress:
                 return False
@@ -78,8 +78,8 @@ class Frontier:
             return None, False
 
     # ---------------- MARK VISITED ----------------
-    def mark_visited(self, url, *, got_task: bool):
-        normalized = normalize_url(url)
+    def mark_visited(self, url, *, got_task: bool, preference_url=None):
+        normalized = normalize_url(url, preference_url=preference_url)
 
         with self.lock:
             self.in_progress.discard(normalized)

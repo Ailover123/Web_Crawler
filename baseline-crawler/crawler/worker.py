@@ -30,16 +30,16 @@ BLOCK_LOCK = threading.Lock()
 # ==================================================
 
 PATH_BLOCK_RULES = {
-    "TAG_PAGE": r"^/tag/",
+    "TAG_PAGE": r"^/(product-)?tag/",
     "AUTHOR_PAGE": r"^/author/",
     "PAGINATION": r"/page/\d*/?$",
     "ASSET_DIRECTORY": r"^/(assets|static|media|uploads|images|img|css|js)/",
 }
 
 QUERY_BLOCK_RULES = {
-    "ELEMENTOR_PAGINATION": r"^e-page-",
-    "GENERIC_PAGINATION": r"^(page|paged|p)$",
-    "SORTING": r"(orderby|sort|order|filter_|display)",
+    "PAGINATION": r"(^|&)(page|paged|p)=",
+    "SORTING": r"(orderby|sort|order|filter_|display)=",
+    "ACTIONS": r"(add-to-cart|add_to_wishlist|action=yith-woocompare|remove_item)",
 }
 
 STATIC_EXTENSIONS = (
@@ -58,7 +58,7 @@ def classify_block(url: str):
         return "STATIC"
 
     if parsed.query:
-        if re.search(r'(^|&)(e-page-[0-9a-fA-F]+)=', parsed.query):
+        if re.search(r'(^|&)(e-page-[0-9a-f_A-F]+)=', parsed.query):
             return "BLOG_EPAGE"
         for k, r in QUERY_BLOCK_RULES.items():
             if re.search(r, parsed.query.lower()):
@@ -215,10 +215,27 @@ class Worker(threading.Thread):
 
                 if not result["success"]:
                     err = result.get("error", "unknown")
+                    
+                    # Suppress noisy messages for ignored content types (e.g., images)
+                    if isinstance(err, str) and "ignored content type" in err:
+                        with self.block_lock:
+                            self.block_report["FETCH_IGNORED_CONTENT_TYPE"]["count"] += 1
+                            if len(self.block_report["FETCH_IGNORED_CONTENT_TYPE"]["urls"]) < 5:
+                                self.block_report["FETCH_IGNORED_CONTENT_TYPE"]["urls"].append(url)
+                        continue
+
                     # Handle soft redirects on 404
                     if "http error: 404" in str(err).lower() and result.get("html"):
                         if self.is_soft_redirect(result["html"]):
-                            html, final_url = JS_RENDERER.render(url)
+                            cached = get_cached_render(url)
+                            if cached:
+                                html = cached
+                                final_url = url # fallback
+                            else:
+                                html, final_url = JS_RENDERER.render(url)
+                                if final_url:
+                                    set_cached_render(final_url, html)
+
                             if final_url and final_url != url:
                                 self.info(f"Soft Redirect recovered {url} -> {final_url}")
                                 result["success"] = True
@@ -246,7 +263,7 @@ class Worker(threading.Thread):
                     "job_id": self.job_id,
                     "custid": self.custid,
                     "siteid": self.siteid,
-                    "url": self._db_url(url),
+                    "url": self._db_url(final_url), # 🔒 Use final destination URL
                     "parent_url": self._db_url(parent) if parent else None,
                     "depth": depth,
                     "status_code": resp.status_code,
@@ -266,8 +283,10 @@ class Worker(threading.Thread):
 
                 if db_action == "Inserted":
                     self.saved_count += 1
+                    self.info(f"DB: Inserted {url} (ID: {affected_id})")
                 elif db_action == "Updated":
                     self.duplicate_count += 1
+                    self.info(f"DB: Updated {url} (ID: {affected_id})")
                 
                 if "text/html" not in ct:
                     continue
@@ -276,9 +295,14 @@ class Worker(threading.Thread):
                 urls, _ = extract_urls(html, final_url)
 
                 if not urls and needs_js_rendering(html):
-                    html, rendered_url = JS_RENDERER.render(final_url)
-                    if rendered_url:
-                        final_url = rendered_url
+                    cached = get_cached_render(final_url)
+                    if cached:
+                        html = cached
+                    else:
+                        html, rendered_url = JS_RENDERER.render(final_url)
+                        if rendered_url:
+                            final_url = rendered_url
+                        set_cached_render(final_url, html)
                     urls, _ = extract_urls(html, final_url)
 
                 # ---------------- MODE LOGIC ----------------
@@ -321,7 +345,7 @@ class Worker(threading.Thread):
                         blocked_domain += 1
                         continue
 
-                    if self.frontier.enqueue(u, url, depth + 1, preference_url=self.seed_url):
+                    if self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.seed_url):
                         enqueued += 1
                     else:
                         self.frontier_duplicate_count += 1
@@ -335,7 +359,7 @@ class Worker(threading.Thread):
                 import traceback
                 self.error(f"ERROR {url}: {e}\n{traceback.format_exc()}")
             finally:
-                self.frontier.mark_visited(url, got_task=got_task)
+                self.frontier.mark_visited(url, got_task=got_task, preference_url=self.seed_url)
 
     def stop(self):
         self.running = False

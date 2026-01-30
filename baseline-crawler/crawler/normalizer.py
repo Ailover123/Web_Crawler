@@ -65,7 +65,7 @@ def normalize_url(
         base_pref = clean_pref[4:] if clean_pref.startswith("www.") else clean_pref
 
         if base_netloc == base_pref:
-            netloc = p_netloc # Force exact match to preference
+            netloc = pref.netloc.lower() # Force exact match to preference
 
     # Standardize path
     path = parsed.path if parsed.path else "/"

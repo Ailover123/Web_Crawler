@@ -63,8 +63,6 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
     normalized_url = normalize_url(url, preference_url=base_url)
     content_hash = semantic_hash(html)
 
-    content_hash = semantic_hash(html)
-
     # 1. Check for existing record
     # --------------------------------------------------
     # 1️⃣ Check if baseline already exists for this URL
@@ -87,13 +85,13 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
         action = "updated"
     else:
         # 🆕 CREATE NEW BASELINE ID ONCE
-        baseline_id = _next_baseline_id(site_dir, siteid)
+        baseline_id = _get_next_sequence_id(siteid)
         path = site_dir / f"{baseline_id}.html"
         action = "created"
 
-    print(
+    logger.info(
         f"[BASELINE] {action.upper()} baseline "
-        f"id={baseline_id} url={url}"
+        f"id={baseline_id} for url={url}"
     )
 
     # 2. Update Database (Always)

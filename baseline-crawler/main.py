@@ -123,7 +123,7 @@ def crawl_site(site, args, target_urls=None):
             job_id=job_id,
             custid=custid,
             siteid=siteid,
-            start_url=original_site_url,
+            start_url=start_url,
         )
 
         start_time = time.time()
@@ -285,7 +285,8 @@ def main():
         log_path = os.path.join(log_dir, log_filename)
         
         file_handler = logging.FileHandler(log_path)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        from crawler.logger import CompanyFormatter
+        file_handler.setFormatter(CompanyFormatter())
         logger.addHandler(file_handler)
         logger.info(f"--- Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
 

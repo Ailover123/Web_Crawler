@@ -42,6 +42,7 @@ def fetch(url, discovered_from=None, depth=0):
                 logger.warning(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Waiting {retry_delay}s...")
                 time.sleep(retry_delay)
                 retry_delay *= 2
+                logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
                 continue
 
             if 200 <= r.status_code < 300:
@@ -86,6 +87,7 @@ def fetch(url, discovered_from=None, depth=0):
                 logger.warning(f"[RETRY {attempt+1}/{max_retries}] Connection Error for {url}. Waiting {retry_delay}s...")
                 time.sleep(retry_delay)
                 retry_delay *= 2
+                logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
                 continue
             return {
                 "success": False,
