@@ -29,7 +29,7 @@ JS_RENDERER = JSRenderWorker()
 
 
 # ==================================================
-# BLOCK RULES
+# SKIP RULES
 # ==================================================
 
 PATH_BLOCK_RULES = {
@@ -42,6 +42,7 @@ PATH_BLOCK_RULES = {
 QUERY_BLOCK_RULES = {
     "ELEMENTOR_PAGINATION": r"e-page-",
     "GENERIC_PAGINATION": r"(page|paged|p)",
+    "SORTING": r"(orderby|sort|order|filter_|display)",
 }
 
 STATIC_EXTENSIONS = (
