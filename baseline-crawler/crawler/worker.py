@@ -56,8 +56,10 @@ STATIC_EXTENSIONS = (
 
 def classify_skip(url: str):
     parsed = urlparse(url)
+    
+    path = parsed.path if parsed.path else ""
 
-    if parsed.path.endswith(STATIC_EXTENSIONS):
+    if path.endswith(STATIC_EXTENSIONS):
         return "STATIC"
 
     if parsed.query:
@@ -68,7 +70,7 @@ def classify_skip(url: str):
                 return k
 
     for k, r in PATH_SKIP_RULES.items():
-        if re.search(r, parsed.path.lower()):
+        if re.search(r, path.lower()):
             return k
 
     return None
