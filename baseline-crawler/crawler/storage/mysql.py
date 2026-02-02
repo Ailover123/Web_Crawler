@@ -143,25 +143,10 @@ def insert_crawl_page(data):
         row = cur.fetchone()
 
         if row:
-            # 2. 🔄 UPDATE: Exists, so update the current row ID
-            existing_id = row[0]
-            cur.execute(
-                """
-                UPDATE crawl_pages SET
-                    job_id=%s, parent_url=%s, depth=%s, status_code=%s,
-                    content_type=%s, content_length=%s, response_time_ms=%s,
-                    fetched_at=%s, updated_at=CURRENT_TIMESTAMP
-                WHERE id = %s
-                """,
-                (
-                    data["job_id"], data["parent_url"], data["depth"],
-                    data["status_code"], data["content_type"],
-                    data["content_length"], data["response_time_ms"],
-                    data["fetched_at"], existing_id
-                )
-            )
-            action = "Updated"
-            affected_id = existing_id
+            # 2. 🛡️ INSERT-ONLY: Exists, so we don't update anything.
+            # We return 'Existed' so the worker knows it wasn't a fresh insert.
+            action = "Existed"
+            affected_id = row[0]
         else:
             # 3. 🆕 INSERT: Doesn't exist, so insert fresh
             cur.execute(

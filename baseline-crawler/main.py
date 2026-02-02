@@ -30,13 +30,14 @@ from crawler.storage.db import (
 )
 from crawler.storage.mysql import fetch_site_info_by_baseline_id
 from crawler.baseline_worker import BaselineWorker
-from crawler.worker import BLOCK_REPORT
+from crawler.worker import SKIP_REPORT
 from crawler.logger import logger
 from crawler.config import (
     MIN_WORKERS,
     MAX_WORKERS,
     MAX_PARALLEL_SITES,
 )
+from crawler.worker import SKIP_LOCK
 
 CRAWL_MODE = os.getenv("CRAWL_MODE", "CRAWL").upper()
 assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE")
@@ -109,8 +110,8 @@ def crawl_site(site, args, target_urls=None):
     
     # Site-local metrics for thread-safety in parallel mode
     from collections import defaultdict
-    site_block_report = defaultdict(lambda: {"count": 0, "urls": []})
-    site_block_lock = threading.Lock()
+    site_skip_report = defaultdict(lambda: {"count": 0, "urls": []})
+    site_skip_lock = threading.Lock()
 
     job_logger = logger
 
@@ -187,8 +188,8 @@ def crawl_site(site, args, target_urls=None):
                 crawl_mode=CRAWL_MODE,
                 seed_url=start_url, 
                 original_site_url=original_site_url,
-                block_report=site_block_report,
-                block_lock=site_block_lock,
+                skip_report=site_skip_report,
+                skip_lock=site_skip_lock,
             )
             w.start()
             workers.append(w)
@@ -217,8 +218,8 @@ def crawl_site(site, args, target_urls=None):
                             crawl_mode=CRAWL_MODE,
                             seed_url=start_url, 
                             original_site_url=original_site_url,
-                            block_report=site_block_report,
-                            block_lock=site_block_lock,
+                            skip_report=site_skip_report,
+                            skip_lock=site_skip_lock,
                         )
                         w.start()
                         workers.append(w)
@@ -237,17 +238,17 @@ def crawl_site(site, args, target_urls=None):
         complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
 
         total_saved = sum(getattr(w, 'saved_count', 0) for w in workers)
-        total_db_updates = sum(getattr(w, 'duplicate_count', 0) for w in workers)
+        total_db_existed = sum(getattr(w, 'existed_count', 0) for w in workers)
         total_failed = sum(getattr(w, 'failed_count', 0) for w in workers)
         total_policy_skipped = sum(getattr(w, 'policy_skipped_count', 0) for w in workers)
         total_frontier_skips = sum(getattr(w, 'frontier_duplicate_count', 0) for w in workers)
-        total_blocked = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_block_report.values())
+        total_skipped_rules = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_skip_report.values())
         
-        # Total Duplicates = DB Updates + Frontier Skips
-        total_duplicates = total_db_updates + total_frontier_skips
+        # Total Duplicates = DB Existed + Frontier Skips
+        total_duplicates = total_db_existed + total_frontier_skips
         
-        # Total Visited = Crawled + Duplicates + Blocked + Failed + Policy Skips
-        total_visited = total_saved + total_duplicates + total_blocked + total_failed + total_policy_skipped
+        # Total Visited = Crawled + Duplicates + Skipped + Failed + Policy Skips
+        total_visited = total_saved + total_duplicates + total_skipped_rules + total_failed + total_policy_skipped
 
         job_logger.info("-" * 60)
         job_logger.info(f"CRAWL COMPLETED FOR SITE {siteid}")
@@ -255,9 +256,9 @@ def crawl_site(site, args, target_urls=None):
         job_logger.info(f"Total URLs Visited: {total_visited}")
         job_logger.info(f"Duplicates Skipped: {total_duplicates}")
         job_logger.info(f" (Frontier Skips) : {total_frontier_skips}")
-        job_logger.info(f" (DB Updates)     : {total_db_updates}")
+        job_logger.info(f" (DB Existed)     : {total_db_existed}")
         job_logger.info(f"Policy Skipped    : {total_policy_skipped}")
-        job_logger.info(f"URLs Blocked      : {total_blocked}")
+        job_logger.info(f"URLs Skipped      : {total_skipped_rules}")
         job_logger.info(f"URLs Failed       : {total_failed}")
         job_logger.info(f"Crawl duration    : {duration:.2f} seconds")
         job_logger.info(f"Workers used      : {len(workers)}")
@@ -265,8 +266,15 @@ def crawl_site(site, args, target_urls=None):
 
         # Update global counters
         global GLOBAL_TOTAL_URLS
-        with threading.Lock():  # Simple lock for global counter
+        with threading.Lock():
             GLOBAL_TOTAL_URLS += total_saved
+
+        # Aggregation logic
+        with site_skip_lock:
+            for skip_type, data in site_skip_report.items():
+                with SKIP_LOCK:
+                    SKIP_REPORT[skip_type]["count"] += data["count"]
+                    SKIP_REPORT[skip_type]["urls"].extend(data["urls"][:5])
 
     except Exception as e:
         fail_crawl_job(job_id, str(e))
@@ -376,11 +384,11 @@ def main():
 if __name__ == "__main__":
     main()
 
-    if BLOCK_REPORT:
+    if SKIP_REPORT:
         print("\n" + "=" * 60)
-        print("GLOBAL BLOCKED URL REPORT")
+        print("GLOBAL SKIPPED URL REPORT")
         print("=" * 60)
-        for block_type, data in BLOCK_REPORT.items():
+        for skip_type, data in SKIP_REPORT.items():
             try:
                 count = len(data.get("urls", []))
                 urls = data.get("urls", [])
@@ -388,7 +396,7 @@ if __name__ == "__main__":
                 count = 0
                 urls = []
 
-            print(f"[{block_type}] {count} URLs blocked")
+            print(f"[{skip_type}] {count} URLs skipped")
             for u in urls[:10]: # Limit print for brevity
                 print(f"  - {u}")
         print("=" * 60)

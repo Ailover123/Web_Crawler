@@ -21,25 +21,28 @@ from crawler.js_render_worker import JSRenderWorker
 JS_RENDERER = JSRenderWorker()
 
 # Thread-safe global for crawler-level reporting
-BLOCK_REPORT = defaultdict(lambda: {"count": 0, "urls": []})
-BLOCK_LOCK = threading.Lock()
+SKIP_REPORT = defaultdict(lambda: {"count": 0, "urls": []})
+SKIP_LOCK = threading.Lock()
 
 
 # ==================================================
 # SKIP RULES
 # ==================================================
 
-PATH_BLOCK_RULES = {
+PATH_SKIP_RULES = {
     "TAG_PAGE": r"^/(product-)?tag/",
     "AUTHOR_PAGE": r"^/author/",
     "PAGINATION": r"/page/\d*/?$",
     "ASSET_DIRECTORY": r"^/(assets|static|media|uploads|images|img|css|js)/",
 }
 
-QUERY_BLOCK_RULES = {
+QUERY_SKIP_RULES = {
     "PAGINATION": r"(^|&)(page|paged|p)=",
     "SORTING": r"(orderby|sort|order|filter_|display)=",
     "ACTIONS": r"(add-to-cart|add_to_wishlist|action=yith-woocompare|remove_item)",
+    "SITE_QUERY": r"(^|&)site=",
+    "GL_TRACKING": r"(^|&)_gl=",
+    "UTM_MARKETING": r"(^|&)utm_",
 }
 
 STATIC_EXTENSIONS = (
@@ -51,7 +54,7 @@ STATIC_EXTENSIONS = (
 )
 
 
-def classify_block(url: str):
+def classify_skip(url: str):
     parsed = urlparse(url)
 
     if parsed.path.endswith(STATIC_EXTENSIONS):
@@ -60,11 +63,11 @@ def classify_block(url: str):
     if parsed.query:
         if re.search(r'(^|&)(e-page-[0-9a-f_A-F]+)=', parsed.query):
             return "BLOG_EPAGE"
-        for k, r in QUERY_BLOCK_RULES.items():
+        for k, r in QUERY_SKIP_RULES.items():
             if re.search(r, parsed.query.lower()):
                 return k
 
-    for k, r in PATH_BLOCK_RULES.items():
+    for k, r in PATH_SKIP_RULES.items():
         if re.search(r, parsed.path.lower()):
             return k
 
@@ -113,8 +116,8 @@ class Worker(threading.Thread):
         crawl_mode,
         seed_url,
         original_site_url=None,   # ✅ DB identity
-        block_report=None,
-        block_lock=None,
+        skip_report=None,
+        skip_lock=None,
     ):
         super().__init__(name=name)
         self.frontier = frontier
@@ -125,12 +128,12 @@ class Worker(threading.Thread):
         self.crawl_mode = crawl_mode
         self.seed_url = seed_url
         self.original_site_url = original_site_url
-        self.block_report = block_report if block_report is not None else BLOCK_REPORT
-        self.block_lock = block_lock if block_lock is not None else BLOCK_LOCK
+        self.skip_report = skip_report if skip_report is not None else SKIP_REPORT
+        self.skip_lock = skip_lock if skip_lock is not None else SKIP_LOCK
 
         self.saved_count = 0
         self.failed_count = 0
-        self.duplicate_count = 0
+        self.existed_count = 0
         self.policy_skipped_count = 0
         self.frontier_duplicate_count = 0
 
@@ -218,10 +221,10 @@ class Worker(threading.Thread):
                     
                     # Suppress noisy messages for ignored content types (e.g., images)
                     if isinstance(err, str) and "ignored content type" in err:
-                        with self.block_lock:
-                            self.block_report["FETCH_IGNORED_CONTENT_TYPE"]["count"] += 1
-                            if len(self.block_report["FETCH_IGNORED_CONTENT_TYPE"]["urls"]) < 5:
-                                self.block_report["FETCH_IGNORED_CONTENT_TYPE"]["urls"].append(url)
+                        with self.skip_lock:
+                            self.skip_report["FETCH_IGNORED_CONTENT_TYPE"]["count"] += 1
+                            if len(self.skip_report["FETCH_IGNORED_CONTENT_TYPE"]["urls"]) < 5:
+                                self.skip_report["FETCH_IGNORED_CONTENT_TYPE"]["urls"].append(url)
                         continue
 
                     # Handle soft redirects on 404
@@ -284,9 +287,9 @@ class Worker(threading.Thread):
                 if db_action == "Inserted":
                     self.saved_count += 1
                     self.info(f"DB: Inserted {url} (ID: {affected_id})")
-                elif db_action == "Updated":
-                    self.duplicate_count += 1
-                    self.info(f"DB: Updated {url} (ID: {affected_id})")
+                elif db_action == "Existed":
+                    self.existed_count += 1
+                    self.info(f"DB: Existed (Not-Touched) {url} (ID: {affected_id})")
                 
                 if "text/html" not in ct:
                     continue
@@ -326,25 +329,25 @@ class Worker(threading.Thread):
                     )
 
                 enqueued = 0
-                blocked_rule = 0
-                blocked_domain = 0
+                skipped_rule = 0
+                skipped_domain = 0
 
                 for u in urls:
-                    block_type = classify_block(u)
-                    if block_type:
-                        with self.block_lock:
-                            self.block_report[block_type]["count"] += 1
-                            if len(self.block_report[block_type]["urls"]) < 5:
-                                self.block_report[block_type]["urls"].append(u)
-                        blocked_rule += 1
+                    skip_type = classify_skip(u)
+                    if skip_type:
+                        with self.skip_lock:
+                            self.skip_report[skip_type]["count"] += 1
+                            if len(self.skip_report[skip_type]["urls"]) < 5:
+                                self.skip_report[skip_type]["urls"].append(u)
+                        skipped_rule += 1
                         continue
 
                     if not _allowed_domain(self.original_site_url, u, current_url=final_url):
-                        with self.block_lock:
-                            self.block_report["DOMAIN_FILTER"]["count"] += 1
-                            if len(self.block_report["DOMAIN_FILTER"]["urls"]) < 5:
-                                self.block_report["DOMAIN_FILTER"]["urls"].append(u)
-                        blocked_domain += 1
+                        with self.skip_lock:
+                            self.skip_report["DOMAIN_FILTER"]["count"] += 1
+                            if len(self.skip_report["DOMAIN_FILTER"]["urls"]) < 5:
+                                self.skip_report["DOMAIN_FILTER"]["urls"].append(u)
+                        skipped_domain += 1
                         continue
 
                     if self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.original_site_url):
@@ -354,8 +357,8 @@ class Worker(threading.Thread):
 
                 if enqueued > 0:
                     self.info(f"Enqueued {enqueued} URLs")
-                if blocked_rule or blocked_domain:
-                    self.info(f"Blocked: rules={blocked_rule}, domain={blocked_domain}")
+                if skipped_rule or skipped_domain:
+                    self.info(f"Skipped: rules={skipped_rule}, domain={skipped_domain}")
 
             except Exception as e:
                 import traceback

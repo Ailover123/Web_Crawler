@@ -37,7 +37,7 @@ graph TD
 | **Phase 3: Queue** | Work Management | `frontier.py` -> `enqueue()` | Deduplicates via `visited` set; manages `in_progress` locks. |
 | **Phase 4: Fetch** | Content Acquisition | `worker.py` -> `run()` | Decides between standard Fetch vs. JS Render (Playwright). |
 | **Phase 5: Parse** | Link Extraction | `parser.py` -> `extract_urls()` | Finds new links; filters static assets and blacklisted paths. |
-| **Phase 6: Persistence** | Permanent Storage | `mysql.py` -> `insert_crawl_page` | Canonicalizes URL; Upserts DB or writes `.html` baseline files. |
+| **Phase 6: Persistence** | Permanent Storage | `mysql.py` -> `insert_crawl_page` | Canonicalizes URL; **Inserts only** to DB (skips updates) or writes `.html` baseline files. |
 
 ---
 
@@ -62,6 +62,7 @@ Once a Worker takes a URL, the data flow splits:
 #### 💾 Phase 6: The Final Destination
 The same HTML content processed in Phase 5 is now routed to the storage engine:
 *   **Canonical Mapping**: We strip `https://` and `www.` to create a unique "ID" in the DB. This prevents `hocco.in/about` and `www.hocco.in/about` from being saved as two different things.
+*   **Insert-Only Strategy**: To maintain a lean history and prioritize discovery, the system skips updates if a URL already exists. Existing records are marked as **`Existed (Not-Touched)`** in logs.
 *   **Output**: Depending on your `CRAWL_MODE`, data flows either into a MySQL row (`crawl_pages`) or into a physical file on disk (`baselines/`) after being compressed and semantically hashed.
 
 ---
@@ -86,7 +87,14 @@ Beyond HTML tags, the `Worker` (`worker.py`) uses regex-based logic to skip enti
 | **ASSETS** | `/assets/\|/static/` | Skips internal system directories. |
 
 #### 2. Query-Based Skipping
-The crawler also ignores URLs containing parameters like `orderby=`, `sort=`, or `add-to-cart=` to avoid duplicate content and "Ghost Carts" during crawling.
+The crawler ignores URLs containing parameters that lead to duplicate content or tracking noise:
+| Parameter | Purpose |
+| :--- | :--- |
+| **PAGINATION** | `page=`, `paged=`, `p=` |
+| **SORTING** | `orderby=`, `sort=`, `filter_=` |
+| **MARKETING** | `utm_`, `_gl=` (Analytics/Tracking) |
+| **SPECIFIC** | `site=` (internal status queries) |
+| **ACTIONS** | `add-to-cart`, `remove_item` |
 
 #### 3. Static Assets
 All links ending in common static extensions (`.png`, `.jpg`, `.pdf`, `.zip`, `.mp3`, etc.) are automatically classified as **STATIC** and skipped by the Worker's main processing loop.
