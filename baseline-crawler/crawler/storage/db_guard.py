@@ -1,4 +1,9 @@
 import threading
+import os
+from dotenv import load_dotenv
 
-# Hard global limit on concurrent DB ops
-DB_SEMAPHORE = threading.BoundedSemaphore(5)
+load_dotenv()
+
+# Global limit on concurrent DB ops matching the connection pool size
+pool_size = int(os.getenv("MYSQL_POOL_SIZE", 5))
+DB_SEMAPHORE = threading.BoundedSemaphore(pool_size)
