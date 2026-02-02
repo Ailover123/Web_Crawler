@@ -1,53 +1,50 @@
 # crawler/storage/baseline_store.py
 
-import threading
 from pathlib import Path
 from crawler.storage.db import insert_defacement_site
-from crawler.storage.mysql import upsert_baseline_hash, fetch_baseline_hash, get_connection
+from crawler.storage.mysql import (
+    upsert_baseline_hash,
+    fetch_baseline_hash,
+    site_has_baselines,
+)
 from crawler.normalizer import normalize_url
-from crawler.logger import logger
-from compare_utils import semantic_hash
+from crawler.content_fingerprint import semantic_hash
+
+import threading
 
 BASELINE_ROOT = Path("baselines")
 
-# Thread-safe lock for sequence generation
+# Global lock and cache for sequence numbers
 _ID_LOCK = threading.Lock()
 _SITE_MAX_IDS = {}
+_SITE_HAS_BASELINES = {}
 
 
-def _get_next_sequence_id(siteid):
+def _next_baseline_id(site_dir: Path, siteid: int, *, force_reset: bool = False) -> str:
     """
-    Finds the next available sequence number for a site by scanning the DB once.
-    Then uses an in-memory counter for this run.
+    Thread-safe generation of the next baseline ID.
+    Uses an in-memory cache to avoid O(N) disk scans on every write.
     """
     with _ID_LOCK:
+        if force_reset:
+            _SITE_MAX_IDS.pop(siteid, None)
+
         if siteid not in _SITE_MAX_IDS:
-            conn = get_connection()
-            try:
-                cur = conn.cursor()
-                # Find the highest number after the '-' in the baseline_path/id
-                cur.execute(
-                    "SELECT baseline_path FROM baseline_pages WHERE site_id = %s", 
-                    (siteid,)
-                )
-                rows = cur.fetchall()
-                max_seq = 0
-                for row in rows:
-                    if row[0]:
-                        try:
-                            # Path is like 'baselines/101/10106/10106-5.html'
-                            stem = Path(row[0]).stem
-                            num = int(stem.split("-")[1])
+            max_seq = 0
+            prefix = f"{siteid}-"
+            
+            if not force_reset and site_dir.exists():
+                for f in site_dir.glob(f"{siteid}-*.html"):
+                    try:
+                        stem = f.stem
+                        if stem.startswith(prefix):
+                            num = int(stem[len(prefix):])
                             if num > max_seq:
                                 max_seq = num
-                        except (IndexError, ValueError):
-                            continue
-                _SITE_MAX_IDS[siteid] = max_seq
-            finally:
-                cur.close()
-                conn.close()
-                from crawler.storage.db_guard import DB_SEMAPHORE
-                DB_SEMAPHORE.release()
+                    except ValueError:
+                        pass
+            
+            _SITE_MAX_IDS[siteid] = max_seq
 
         _SITE_MAX_IDS[siteid] += 1
         return f"{siteid}-{_SITE_MAX_IDS[siteid]}"
@@ -61,11 +58,12 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
     """
 
     normalized_url = normalize_url(url, preference_url=base_url)
-    content_hash = semantic_hash(html)
 
     content_hash = semantic_hash(html)
 
-    # 1. Check for existing record
+    site_dir = BASELINE_ROOT / str(custid) / str(siteid)
+    site_dir.mkdir(parents=True, exist_ok=True)
+
     # --------------------------------------------------
     # 1️⃣ Check if baseline already exists for this URL
     # --------------------------------------------------
@@ -75,28 +73,34 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
         base_url=base_url,
     )
 
-    site_dir = BASELINE_ROOT / str(custid) / str(siteid)
-    site_dir.mkdir(parents=True, exist_ok=True)
+    if siteid not in _SITE_HAS_BASELINES:
+        _SITE_HAS_BASELINES[siteid] = site_has_baselines(siteid)
 
     if existing and existing.get("baseline_path"):
-        # 🔁 UPDATE EXISTING BASELINE: reuse same file name and path
-        path = Path(existing["baseline_path"])
-        baseline_id = path.stem
-        # Ensure parent exists before overwrite
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # 🔁 UPDATE EXISTING BASELINE
+        baseline_id = Path(existing["baseline_path"]).stem
         action = "updated"
     else:
         # 🆕 CREATE NEW BASELINE ID ONCE
-        baseline_id = _next_baseline_id(site_dir, siteid)
-        path = site_dir / f"{baseline_id}.html"
+        reset_sequence = not _SITE_HAS_BASELINES.get(siteid, False)
+        baseline_id = _next_baseline_id(
+            site_dir,
+            siteid,
+            force_reset=reset_sequence,
+        )
         action = "created"
+        _SITE_HAS_BASELINES[siteid] = True
+
+    path = site_dir / f"{baseline_id}.html"
 
     print(
         f"[BASELINE] {action.upper()} baseline "
         f"id={baseline_id} url={url}"
     )
 
-    # 2. Update Database (Always)
+    # --------------------------------------------------
+    # 2️⃣ UPSERT baseline record
+    # --------------------------------------------------
     upsert_baseline_hash(
         site_id=siteid,
         normalized_url=normalized_url,
@@ -105,15 +109,13 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
         base_url=base_url,
     )
 
-    # 3. Write File
     # --------------------------------------------------
     # 3️⃣ Overwrite the SAME file every time
     # --------------------------------------------------
     path.write_text(html.strip(), encoding="utf-8")
 
-    # 4. Link to Defacement Site
     # --------------------------------------------------
-    # 4️⃣ Ensure defacement_sites points to SAME baseline_id
+    # 4️⃣ Ensure defacement_sites points to baseline_id
     # --------------------------------------------------
     insert_defacement_site(
         siteid=siteid,
