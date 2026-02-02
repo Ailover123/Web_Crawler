@@ -74,6 +74,23 @@ To ensure stable hashes and clean discovery, the crawler's normalization engine 
 *   **`<style>`**: Ignores CSS changes that don't affect semantic content.
 *   **`<noscript>`**: Avoids duplicate content analysis from fallback tags.
 
+### 🛑 Worker Filtering (Advanced Skip Rules)
+Beyond HTML tags, the `Worker` (`worker.py`) uses regex-based logic to skip entire classes of URLs that are redundant or noisy:
+
+#### 1. Path-Based Skipping
+| Label | Regex Pattern | Purpose |
+| :--- | :--- | :--- |
+| **TAG_PAGE** | `/(product-)?tag/` | Skips WordPress/Ecommerce "tag" archives (redundant). |
+| **AUTHOR_PAGE** | `/author/` | Skips user profile pages. |
+| **PAGINATION** | `/page/\d*/` | Skips deep archives to prevent "Crawler Traps". |
+| **ASSETS** | `/assets/\|/static/` | Skips internal system directories. |
+
+#### 2. Query-Based Skipping
+The crawler also ignores URLs containing parameters like `orderby=`, `sort=`, or `add-to-cart=` to avoid duplicate content and "Ghost Carts" during crawling.
+
+#### 3. Static Assets
+All links ending in common static extensions (`.png`, `.jpg`, `.pdf`, `.zip`, `.mp3`, etc.) are automatically classified as **STATIC** and skipped by the Worker's main processing loop.
+
 ### ⏱️ Timeout Configuration
 These values are tuned for **LiteSpeed/Enterprise** servers to avoid "Door hanging" (getting stuck on a response).
 
@@ -88,7 +105,7 @@ These values are tuned for **LiteSpeed/Enterprise** servers to avoid "Door hangi
 ### 💾 Persistence Logic (When DB Writes Happen)
 Data writes are not batched at the end; they happen **atomically** to prevent data loss if a crawl is interrupted:
 1.  **START**: `insert_crawl_job` writes a "pending" row to `crawl_jobs`.
-2.  **DURING**: `insert_crawl_page` (CRAWL mode) or `upsert_baseline_hash` (BASELINE mode) writes to the DB **immediately** after each URL is successfully processed.
+2.  **DURING**: `insert_crawl_page` (CRAWL mode)  writes to the DB **immediately** after each URL is successfully processed.
 3.  **FINISH**: `complete_crawl_job` updates the job status to "completed" once the Frontier queue hits zero and workers shut down.
 
 ---
