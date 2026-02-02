@@ -114,6 +114,16 @@ def fail_crawl_job(job_id, err):
 
 
 def insert_crawl_page(data):
+    # 🛡️ Safety check: Prevent any crawl_pages insertions during BASELINE mode
+    crawl_mode = os.getenv("CRAWL_MODE", "CRAWL").upper()
+    if crawl_mode == "BASELINE":
+        from crawler.logger import logger
+        logger.warning(
+            f"[SAFETY] Attempted to insert into crawl_pages during BASELINE mode. "
+            f"This operation is prohibited. URL: {data.get('url')}"
+        )
+        return None
+    
     # Pass seed_url if available to ensure domain matches sites table
     base_url = data.get("base_url")
     canonical_url = get_canonical_id(data["url"], base_url)
@@ -261,6 +271,21 @@ def fetch_baseline_hash(site_id, normalized_url, base_url=None):
             (site_id, canonical_url),
         )
         return cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+        DB_SEMAPHORE.release()
+
+
+def site_has_baselines(site_id):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM baseline_pages WHERE site_id=%s LIMIT 1",
+            (site_id,),
+        )
+        return cur.fetchone() is not None
     finally:
         cur.close()
         conn.close()
