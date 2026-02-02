@@ -45,6 +45,17 @@ assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE")
 # Global crawl counters (Session Summary)
 GLOBAL_TOTAL_URLS = 0
 GLOBAL_START_TIME = time.time()
+LAST_ACTIVITY_TIME = time.time()
+WATCHDOG_TIMEOUT = 120  # 2 minutes hard timeout for inactivity
+
+def watchdog_thread():
+    """Kills the process if no activity is detected for WATCHDOG_TIMEOUT seconds."""
+    while True:
+        time.sleep(60)
+        elapsed = time.time() - LAST_ACTIVITY_TIME
+        if elapsed > WATCHDOG_TIMEOUT:
+            logger.critical(f"FATAL: Watchdog timer expired! No activity for {elapsed:.0f}s. Force killing process.")
+            os._exit(1)  # Force kill, no cleanup
 
 # ============================================================
 # SEED URL RESOLUTION
@@ -139,8 +150,8 @@ def crawl_site(site, args, target_urls=None):
         if CRAWL_MODE == "BASELINE":
             job_logger.info(f"[MODE] BASELINE (offline refetch from DB for siteid={siteid})")
             
-            # Since BaselineWorker currently hardcodes max_workers=10
-            worker_count = 10
+            # Since BaselineWorker currently hardcodes max_workers=5
+            worker_count = 5
             for i in range(worker_count):
                 job_logger.info(f"Worker-{i} : started (BASELINE)")
             job_logger.info(f"Started {worker_count} workers.")
@@ -283,11 +294,8 @@ def crawl_site(site, args, target_urls=None):
         traceback.print_exc()
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 def main():
+    # ... (existing parser args code) ...
     parser = argparse.ArgumentParser(description="Web Crawler / Baseline Tool")
     parser.add_argument("--siteid", type=int, nargs='+', help="Crawl one or more specific Site IDs")
     parser.add_argument("--custid", type=int, nargs='+', help="Crawl all sites for one or more specific Customer IDs")
@@ -296,6 +304,13 @@ def main():
     parser.add_argument("--max_parallel_sites", type=int, help="Override MAX_PARALLEL_SITES limit")
     parser.add_argument("--log", action="store_true", help="Enable file logging for each job")
     args = parser.parse_args()
+
+    # Start Watchdog
+    t = threading.Thread(target=watchdog_thread, daemon=True)
+    t.start()
+    logger.info(f"Watchdog active: Force kill if inactivity > {WATCHDOG_TIMEOUT}s")
+
+    # ... (existing db check and site fetching) ...
 
     # ---------------- DB CHECK ----------------
     if not check_db_health():
@@ -376,6 +391,11 @@ def main():
                         site = future_to_site[future]
                         try:
                             future.result(timeout=site_timeout)
+                            
+                            # Reset watchdog
+                            global LAST_ACTIVITY_TIME
+                            LAST_ACTIVITY_TIME = time.time()
+                            
                         except Exception as e:
                             logger.error(f"Site {site.get('siteid')} task failed or timed out ({site_timeout}s): {e}")
 
