@@ -21,7 +21,7 @@ _SITE_MAX_IDS = {}
 _SITE_HAS_BASELINES = {}
 
 
-def _next_baseline_id(site_dir: Path, siteid: int, *, force_reset: bool = False) -> str:
+def _next_baseline_id(site_dir: Path, siteid: int, *, force_reset: bool = False, reuse_if_orphaned: bool = False) -> str:
     """
     Thread-safe generation of the next baseline ID.
     Uses an in-memory cache to avoid O(N) disk scans on every write.
@@ -34,7 +34,9 @@ def _next_baseline_id(site_dir: Path, siteid: int, *, force_reset: bool = False)
             max_seq = 0
             prefix = f"{siteid}-"
             
-            if not force_reset and site_dir.exists():
+            # If we are strictly overwriting (first run or reset), we start from 0
+            # AND we tolerate if files exist (we claim the IDs sequentially).
+            if not force_reset and not reuse_if_orphaned and site_dir.exists():
                 for f in site_dir.glob(f"{siteid}-*.html"):
                     try:
                         stem = f.stem
@@ -83,11 +85,15 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
         action = "updated"
     else:
         # 🆕 CREATE NEW BASELINE ID ONCE
+        # If this is the FIRST baseline for this site in this run/context (reset_sequence=True),
+        # we allow overwriting files 1, 2, 3... treating them as 'orphaned' if DB doesn't know them.
         reset_sequence = not _SITE_HAS_BASELINES.get(siteid, False)
+        
         baseline_id = _next_baseline_id(
             site_dir,
             siteid,
             force_reset=reset_sequence,
+            reuse_if_orphaned=reset_sequence, 
         )
         action = "created"
         _SITE_HAS_BASELINES[siteid] = True
