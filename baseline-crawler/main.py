@@ -138,6 +138,12 @@ def crawl_site(site, args, target_urls=None):
         # ====================================================
         if CRAWL_MODE == "BASELINE":
             job_logger.info(f"[MODE] BASELINE (offline refetch from DB for siteid={siteid})")
+            
+            # Since BaselineWorker currently hardcodes max_workers=10
+            worker_count = 10
+            for i in range(worker_count):
+                job_logger.info(f"Worker-{i} : started (BASELINE)")
+            job_logger.info(f"Started {worker_count} workers.")
 
             stats = BaselineWorker(
                 custid=custid,
