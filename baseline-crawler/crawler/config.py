@@ -11,7 +11,7 @@ from pathlib import Path
 ALLOWED_DOMAINS = []
 
 # Network timeout for HTTP requests (seconds)
-REQUEST_TIMEOUT = 20
+REQUEST_TIMEOUT = 10
 
 # User-Agent string for crawler identification
 # Use a modern browser UA to reduce bot challenges
