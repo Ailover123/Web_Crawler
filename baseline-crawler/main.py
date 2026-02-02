@@ -352,20 +352,37 @@ def main():
         if args.parallel:
             max_parallel_sites = args.max_parallel_sites or MAX_PARALLEL_SITES
             logger.info(f"Parallel mode enabled (max {max_parallel_sites} sites at once).")
-            with ThreadPoolExecutor(max_workers=max_parallel_sites) as executor:
-                # Submit all tasks
-                future_to_site = {executor.submit(crawl_site, s, args, target_urls): s for s in sites}
+
+            # Batch processing to prevent resource exhaustion (leaks, open files, etc.)
+            BATCH_SIZE = 20
+            
+            def chunked_sites(iterable, n):
+                for i in range(0, len(iterable), n):
+                    yield iterable[i:i + n]
+
+            site_batches = list(chunked_sites(sites, BATCH_SIZE))
+            total_batches = len(site_batches)
+
+            for i, batch in enumerate(site_batches, 1):
+                logger.info(f"Processing Batch {i}/{total_batches} ({len(batch)} sites)...")
                 
-                # Wait for completion with timeout per site
-                # Default 30 minutes (1800s) to allow large sites to finish, but prevent infinite hangs.
-                site_timeout = int(os.getenv("SITE_PROCESS_TIMEOUT", 1800))
-                
-                for future in as_completed(future_to_site):
-                    site = future_to_site[future]
-                    try:
-                        future.result(timeout=site_timeout)
-                    except Exception as e:
-                        logger.error(f"Site {site.get('siteid')} task failed or timed out ({site_timeout}s): {e}")
+                # Create a FRESH executor for each batch to ensure threads are cleaned up
+                with ThreadPoolExecutor(max_workers=max_parallel_sites) as executor:
+                    future_to_site = {executor.submit(crawl_site, s, args, target_urls): s for s in batch}
+                    
+                    site_timeout = int(os.getenv("SITE_PROCESS_TIMEOUT", 1800))
+                    
+                    for future in as_completed(future_to_site):
+                        site = future_to_site[future]
+                        try:
+                            future.result(timeout=site_timeout)
+                        except Exception as e:
+                            logger.error(f"Site {site.get('siteid')} task failed or timed out ({site_timeout}s): {e}")
+
+                logger.info(f"Batch {i}/{total_batches} completed.")
+                # Small cool-down between batches
+                time.sleep(2)
+
         else:
             for site in sites:
                 crawl_site(site, args, target_urls)
