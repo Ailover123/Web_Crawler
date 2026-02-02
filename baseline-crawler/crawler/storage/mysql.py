@@ -233,7 +233,7 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
 def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, base_url=None):
     """
     Insert or UPDATE baseline for a URL.
-    Always keeps the latest baseline.
+    Manually checks for existence to handle cases where DB Unique Constraints might be missing.
     """
     canonical_url = get_canonical_id(normalized_url, base_url)
     if not canonical_url:
@@ -242,18 +242,37 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
     conn = get_connection()
     try:
         cur = conn.cursor()
+        
+        # 1. 🔍 Check via SELECT to avoid duplicates if constraints are missing
         cur.execute(
-            """
-            INSERT INTO baseline_pages
-                (site_id, normalized_url, content_hash, baseline_path)
-            VALUES (%s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                content_hash = VALUES(content_hash),
-                baseline_path = VALUES(baseline_path),
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (site_id, canonical_url, content_hash, baseline_path),
+            "SELECT id FROM baseline_pages WHERE site_id=%s AND normalized_url=%s",
+            (site_id, canonical_url)
         )
+        row = cur.fetchone()
+        
+        if row:
+            # 2. 🔄 UPDATE
+            cur.execute(
+                """
+                UPDATE baseline_pages
+                SET content_hash = %s,
+                    baseline_path = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (content_hash, baseline_path, row[0]),
+            )
+        else:
+            # 3. 🆕 INSERT
+            cur.execute(
+                """
+                INSERT INTO baseline_pages
+                    (site_id, normalized_url, content_hash, baseline_path, updated_at)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """,
+                (site_id, canonical_url, content_hash, baseline_path),
+            )
+            
         conn.commit()
         return True
     finally:

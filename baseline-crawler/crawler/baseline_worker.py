@@ -29,13 +29,23 @@ class BaselineWorker:
                 f"[BASELINE] No crawl_pages data found for site_id={self.siteid}. "
                 "Run CRAWL mode first."
             )
-            return
+            return {"created": 0, "updated": 0, "failed": 0}
 
         created = 0
         updated = 0
         failed = 0
 
-        for url in urls:
+        # Parallel Execution for faster baseline collection
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        # Helper function for parallel execution
+        def process_url(url):
+            import threading
+            worker_name = threading.current_thread().name
+            # Simply renaming threads to look like "Worker-X" is tricky in a pool without custom init,
+            # but ThreadPoolExecutor threads are usually named "ThreadPoolExecutor-0_0".
+            # We can just use the thread name as is, or map it.
+            
             try:
                 fetch_url = normalize_url(
                     url,
@@ -48,13 +58,12 @@ class BaselineWorker:
                 result = fetch(fetch_url)
                 if not result["success"]:
                     logger.error(f"[BASELINE] Fetch failed for {fetch_url}: {result.get('error')}")
-                    failed += 1
-                    continue
+                    return "failed", f"Fetch failed: {result.get('error')}", worker_name
 
                 resp = result["response"]
                 ct = resp.headers.get("Content-Type", "").lower()
                 if "text/html" not in ct:
-                    continue
+                    return "skipped", "Not HTML", worker_name
 
                 baseline_id, path, action = save_baseline(
                     custid=self.custid,
@@ -63,17 +72,52 @@ class BaselineWorker:
                     html=resp.text,
                     base_url=self.seed_url,
                 )
-
-                if action == "created":
-                    logger.info(f"[BASELINE] Created baseline {baseline_id} for {url}")
-                    created += 1
-                elif action == "updated":
-                    logger.info(f"[BASELINE] Updated baseline {baseline_id} for {url}")
-                    updated += 1
+                
+                return action, f"{baseline_id} for {url}", worker_name
 
             except Exception as e:
                 logger.error(f"[BASELINE] Error processing {url}: {e}")
-                failed += 1
+                return "failed", f"Error: {e}", worker_name
+
+        logger.info(f"[BASELINE] Parallel fetch with 10 workers for {len(urls)} URLs...")
+
+        # Use thread_name_prefix="Worker" to get names like "Worker_0", "Worker_1" etc.
+        # Note: ThreadPoolExecutor appends "_X" (index).
+        with ThreadPoolExecutor(max_workers=10, thread_name_prefix="Worker") as executor:
+            future_to_url = {executor.submit(process_url, url): url for url in urls}
+            
+            for future in as_completed(future_to_url):
+                try:
+                    action, details, thread_name = future.result()
+                    
+                    # Clean up thread name to match "Worker-X" format
+                    # ThreadPoolExecutor names are typically "Worker_0", "Worker_1"
+                    # We want "Worker-0", "Worker-1"
+                    if "_" in thread_name:
+                         try:
+                             prefix, idx = thread_name.rsplit("_", 1)
+                             if "Worker" in prefix:
+                                 worker_display_name = f"Worker-{idx}"
+                             else:
+                                 worker_display_name = thread_name
+                         except:
+                             worker_display_name = thread_name
+                    else:
+                        worker_display_name = thread_name
+
+                    if action == "created":
+                        logger.info(f"{worker_display_name} : [BASELINE] Created baseline {details}")
+                        created += 1
+                    elif action == "updated":
+                        logger.info(f"{worker_display_name} : [BASELINE] Updated baseline {details}")
+                        updated += 1
+                    elif action == "failed":
+                        logger.error(f"{worker_display_name} : [BASELINE] {details}")
+                        failed += 1
+                    # 'skipped' counts are ignored 
+                except Exception as e:
+                    logger.error(f"Worker exception: {e}")
+                    failed += 1
 
         logger.info(
             f"[BASELINE] Done | created={created} updated={updated} failed={failed}"
