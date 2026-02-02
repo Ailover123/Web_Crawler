@@ -34,6 +34,7 @@ class BaselineWorker:
         created = 0
         updated = 0
         failed = 0
+        skipped = 0
 
         # Parallel Execution for faster baseline collection
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,9 +43,6 @@ class BaselineWorker:
         def process_url(url):
             import threading
             worker_name = threading.current_thread().name
-            # Simply renaming threads to look like "Worker-X" is tricky in a pool without custom init,
-            # but ThreadPoolExecutor threads are usually named "ThreadPoolExecutor-0_0".
-            # We can just use the thread name as is, or map it.
             
             try:
                 fetch_url = normalize_url(
@@ -63,7 +61,7 @@ class BaselineWorker:
                 resp = result["response"]
                 ct = resp.headers.get("Content-Type", "").lower()
                 if "text/html" not in ct:
-                    return "skipped", "Not HTML", worker_name
+                    return "skipped", f"Not HTML ({ct})", worker_name
 
                 baseline_id, path, action = save_baseline(
                     custid=self.custid,
@@ -91,8 +89,6 @@ class BaselineWorker:
                     action, details, thread_name = future.result()
                     
                     # Clean up thread name to match "Worker-X" format
-                    # ThreadPoolExecutor names are typically "Worker_0", "Worker_1"
-                    # We want "Worker-0", "Worker-1"
                     if "_" in thread_name:
                          try:
                              prefix, idx = thread_name.rsplit("_", 1)
@@ -114,17 +110,22 @@ class BaselineWorker:
                     elif action == "failed":
                         logger.error(f"{worker_display_name} : [BASELINE] {details}")
                         failed += 1
-                    # 'skipped' counts are ignored 
+                    elif action == "skipped":
+                        # Optional: Log skips to see why mismatch exists
+                        # logger.info(f"{worker_display_name} : [BASELINE] Skipped {details}")
+                        skipped += 1
+                        
                 except Exception as e:
                     logger.error(f"Worker exception: {e}")
                     failed += 1
 
         logger.info(
-            f"[BASELINE] Done | created={created} updated={updated} failed={failed}"
+            f"[BASELINE] Done | created={created} updated={updated} failed={failed} skipped={skipped}"
         )
         
         return {
             "created": created,
             "updated": updated,
             "failed": failed,
+            "skipped": skipped,
         }
