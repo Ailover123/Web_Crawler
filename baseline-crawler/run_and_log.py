@@ -8,6 +8,7 @@ import sys
 import os
 import time
 import datetime
+import re
 
 def main():
     # Ensure we're in the directory of this script
@@ -27,7 +28,19 @@ def main():
     print(f"Logging output to: {log_path}")
 
     # Run main.py and capture all output in real-time
-    # with open(log_path, 'w', encoding='utf-8') as f: # DISABLED as per user request
+    baseline_stats = {
+        "created": None,
+        "updated": None,
+        "failed": None,
+    }
+
+    stat_patterns = {
+        "created": re.compile(r"Baselines Created\s*:\s*(\d+)", re.IGNORECASE),
+        "updated": re.compile(r"Baselines Updated\s*:\s*(\d+)", re.IGNORECASE),
+        "failed": re.compile(r"Baselines Failed\s*:\s*(\d+)", re.IGNORECASE),
+    }
+
+    # DISABLED per user request: with open(log_path, 'w', encoding='utf-8') as f:
     # Use a more robust way to read output without crashing on character encoding issues
     process = subprocess.Popen([sys.executable, 'main.py'] + sys.argv[1:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     while True:
@@ -38,9 +51,24 @@ def main():
             # Decode with 'replace' to handle non-UTF-8 bytes (like 0xbf) gracefully
             output = line_bytes.decode('utf-8', errors='replace')
             print(output.strip())  # Print to terminal
-            # f.write(output)  # Write to file
-            # f.flush()  # Ensure it's written immediately
+
+            # Capture baseline summaries when they show up in BASELINE mode
+            for key, pattern in stat_patterns.items():
+                match = pattern.search(output)
+                if match:
+                    baseline_stats[key] = int(match.group(1))
+
     rc = process.poll()
+
+    # Append baseline summary if we captured any stats
+    if any(value is not None for value in baseline_stats.values()):
+        summary = (
+            "\n[BASELINE SUMMARY] "
+            f"Created={baseline_stats['created'] if baseline_stats['created'] is not None else 'N/A'}, "
+            f"Updated={baseline_stats['updated'] if baseline_stats['updated'] is not None else 'N/A'}, "
+            f"Failed={baseline_stats['failed'] if baseline_stats['failed'] is not None else 'N/A'}\n"
+        )
+        print(summary.strip())
 
     print(f"\nCrawl completed.")
 
