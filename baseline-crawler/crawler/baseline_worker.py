@@ -77,11 +77,11 @@ class BaselineWorker:
                 logger.error(f"[BASELINE] Error processing {url}: {e}")
                 return "failed", f"Error: {e}", worker_name
 
-        logger.info(f"[BASELINE] Parallel fetch with 10 workers for {len(urls)} URLs...")
+        logger.info(f"[BASELINE] Parallel fetch with 5 workers for {len(urls)} URLs...")
 
         # Use thread_name_prefix="Worker" to get names like "Worker_0", "Worker_1" etc.
         # Note: ThreadPoolExecutor appends "_X" (index).
-        with ThreadPoolExecutor(max_workers=10, thread_name_prefix="Worker") as executor:
+        with ThreadPoolExecutor(max_workers=5, thread_name_prefix="Worker") as executor:
             future_to_url = {executor.submit(process_url, url): url for url in urls}
             
             for future in as_completed(future_to_url):
