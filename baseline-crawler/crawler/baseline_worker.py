@@ -1,4 +1,5 @@
 # crawler/baseline_worker.py
+
 from crawler.fetcher import fetch
 from crawler.storage.crawl_reader import iter_crawl_urls
 from crawler.storage.baseline_store import save_baseline
@@ -18,8 +19,8 @@ class BaselineWorker:
         logger.info(f"[BASELINE] Controlled baseline refetch started for site_id={self.siteid}")
 
         if self.target_urls:
-            logger.info(f"[BASELINE] Targeting {len(self.target_urls)} specific URL(s).")
-            urls = self.target_urls
+             logger.info(f"[BASELINE] Targeting {len(self.target_urls)} specific URL(s).")
+             urls = self.target_urls
         else:
             urls = iter_crawl_urls(siteid=self.siteid)
 
@@ -28,7 +29,7 @@ class BaselineWorker:
                 f"[BASELINE] No crawl_pages data found for site_id={self.siteid}. "
                 "Run CRAWL mode first."
             )
-            return {"created": 0, "updated": 0, "failed": 0}
+            return
 
         created = 0
         updated = 0
@@ -69,8 +70,6 @@ class BaselineWorker:
                 elif action == "updated":
                     logger.info(f"[BASELINE] Updated baseline {baseline_id} for {url}")
                     updated += 1
-                else:
-                    logger.info(f"[BASELINE] No change for {url}")
 
             except Exception as e:
                 logger.error(f"[BASELINE] Error processing {url}: {e}")

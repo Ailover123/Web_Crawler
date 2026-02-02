@@ -27,22 +27,22 @@ def main():
     print(f"Logging output to: {log_path}")
 
     # Run main.py and capture all output in real-time
-    with open(log_path, 'w', encoding='utf-8') as f:
-        # Use a more robust way to read output without crashing on character encoding issues
-        process = subprocess.Popen([sys.executable, 'main.py'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        while True:
-            line_bytes = process.stdout.readline()
-            if not line_bytes and process.poll() is not None:
-                break
-            if line_bytes:
-                # Decode with 'replace' to handle non-UTF-8 bytes (like 0xbf) gracefully
-                output = line_bytes.decode('utf-8', errors='replace')
-                print(output.strip())  # Print to terminal
-                f.write(output)  # Write to file
-                f.flush()  # Ensure it's written immediately
-        rc = process.poll()
+    # with open(log_path, 'w', encoding='utf-8') as f: # DISABLED as per user request
+    # Use a more robust way to read output without crashing on character encoding issues
+    process = subprocess.Popen([sys.executable, 'main.py'] + sys.argv[1:], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    while True:
+        line_bytes = process.stdout.readline()
+        if not line_bytes and process.poll() is not None:
+            break
+        if line_bytes:
+            # Decode with 'replace' to handle non-UTF-8 bytes (like 0xbf) gracefully
+            output = line_bytes.decode('utf-8', errors='replace')
+            print(output.strip())  # Print to terminal
+            # f.write(output)  # Write to file
+            # f.flush()  # Ensure it's written immediately
+    rc = process.poll()
 
-    print(f"\nCrawl completed. Output saved to {log_path}")
+    print(f"\nCrawl completed.")
 
 if __name__ == "__main__":
     main()

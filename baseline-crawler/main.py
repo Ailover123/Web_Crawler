@@ -32,14 +32,18 @@ from crawler.storage.mysql import fetch_site_info_by_baseline_id
 from crawler.baseline_worker import BaselineWorker
 from crawler.worker import BLOCK_REPORT
 from crawler.logger import logger
+from crawler.config import (
+    MIN_WORKERS,
+    MAX_WORKERS,
+    MAX_PARALLEL_SITES,
+)
 
 CRAWL_MODE = os.getenv("CRAWL_MODE", "CRAWL").upper()
 assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE")
 
-INITIAL_WORKERS = 5
-MAX_WORKERS = 20
-SCALE_THRESHOLD = 100
-
+# Global crawl counters (Session Summary)
+GLOBAL_TOTAL_URLS = 0
+GLOBAL_START_TIME = time.time()
 
 # ============================================================
 # SEED URL RESOLUTION
@@ -167,7 +171,7 @@ def crawl_site(site, args, target_urls=None):
         workers = []
         siteid_map = {siteid: siteid}
 
-        for i in range(INITIAL_WORKERS):
+        for i in range(MIN_WORKERS):
             w = Worker(
                 frontier=frontier,
                 name=f"Worker-{siteid}-{i}",
@@ -184,7 +188,40 @@ def crawl_site(site, args, target_urls=None):
             workers.append(w)
 
         job_logger.info(f"Started {len(workers)} workers for site {siteid}.")
-        frontier.queue.join()
+        
+        # --- DYNAMIC SCALING LOOP ---
+        try:
+            while True:
+                # Wait for queue to process
+                time.sleep(5)
+                
+                qsize = frontier.queue.qsize()
+                unfinished = frontier.queue.unfinished_tasks
+                
+                # Scale up if queue is pressurized
+                if qsize > 100 and len(workers) < MAX_WORKERS:
+                    scale_count = min(5, MAX_WORKERS - len(workers))
+                    for i in range(scale_count):
+                        w = Worker(
+                            frontier=frontier,
+                            name=f"Worker-{siteid}-{len(workers)}",
+                            custid=custid,
+                            siteid_map=siteid_map,
+                            job_id=job_id,
+                            crawl_mode=CRAWL_MODE,
+                            seed_url=start_url, 
+                            original_site_url=original_site_url,
+                            block_report=site_block_report,
+                            block_lock=site_block_lock,
+                        )
+                        w.start()
+                        workers.append(w)
+                    job_logger.info(f"Dynamically scaled up to {len(workers)} workers (Queue: {qsize})")
+
+                if unfinished == 0:
+                    break
+        except KeyboardInterrupt:
+            job_logger.warning("Scaling loop interrupted.")
 
         for w in workers: w.stop()
         for w in workers: w.join()
@@ -220,6 +257,11 @@ def crawl_site(site, args, target_urls=None):
         job_logger.info(f"Workers used      : {len(workers)}")
         job_logger.info("-" * 60)
 
+        # Update global counters
+        global GLOBAL_TOTAL_URLS
+        with threading.Lock():  # Simple lock for global counter
+            GLOBAL_TOTAL_URLS += total_saved
+
     except Exception as e:
         fail_crawl_job(job_id, str(e))
         job_logger.error(f"Crawl job {job_id} failed: {e}")
@@ -237,6 +279,7 @@ def main():
     parser.add_argument("--custid", type=int, nargs='+', help="Crawl all sites for one or more specific Customer IDs")
     parser.add_argument("--baseline_id", type=str, help="Run only for this specific BASELINE ID")
     parser.add_argument("--parallel", action="store_true", help="Crawl multiple sites in parallel")
+    parser.add_argument("--max_parallel_sites", type=int, help="Override MAX_PARALLEL_SITES limit")
     parser.add_argument("--log", action="store_true", help="Enable file logging for each job")
     args = parser.parse_args()
 
@@ -293,7 +336,7 @@ def main():
     # ---------------- EXECUTION ----------------
     try:
         if args.parallel:
-            max_parallel_sites = int(os.getenv("MAX_PARALLEL_SITES", 3))
+            max_parallel_sites = args.max_parallel_sites or MAX_PARALLEL_SITES
             logger.info(f"Parallel mode enabled (max {max_parallel_sites} sites at once).")
             with ThreadPoolExecutor(max_workers=max_parallel_sites) as executor:
                 list(executor.map(lambda s: crawl_site(s, args, target_urls), sites))
@@ -302,6 +345,17 @@ def main():
                 crawl_site(site, args, target_urls)
     finally:
         if file_handler:
+            total_duration = time.time() - GLOBAL_START_TIME
+            logger.info("=" * 60)
+            logger.info("GLOBAL SESSION SUMMARY")
+            logger.info("=" * 60)
+            logger.info(f"Total Sites Processed : {len(sites)}")
+            logger.info(f"Total Global URLs     : {GLOBAL_TOTAL_URLS}")
+            logger.info(f"Total Session Time    : {total_duration:.2f} seconds")
+            if total_duration > 0:
+                logger.info(f"Overall Throughput    : {GLOBAL_TOTAL_URLS / total_duration:.2f} URLs/sec")
+            logger.info("=" * 60)
+            
             logger.info(f"--- Session ended: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
             logger.removeHandler(file_handler)
             file_handler.close()

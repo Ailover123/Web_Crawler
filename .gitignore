@@ -27,3 +27,4 @@ logs/
 baselines/
 data_*.db
 export_*.json
+debug/

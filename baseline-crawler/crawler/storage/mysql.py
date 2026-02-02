@@ -174,6 +174,13 @@ def insert_crawl_page(data):
 
         conn.commit()
 
+        if action == "Inserted":
+            from crawler.logger import logger
+            logger.info(f"DB: Inserted {canonical_url} (ID: {affected_id})")
+        elif action == "Updated":
+            from crawler.logger import logger
+            logger.info(f"DB: Updated {canonical_url} (ID: {affected_id})")
+
         return {
             "action": action,
             "id": affected_id

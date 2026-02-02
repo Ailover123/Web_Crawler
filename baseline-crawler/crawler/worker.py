@@ -297,8 +297,10 @@ class Worker(threading.Thread):
                 if not urls and needs_js_rendering(html):
                     cached = get_cached_render(final_url)
                     if cached:
+                        self.info(f"JS: Using cached render for {final_url}")
                         html = cached
                     else:
+                        self.info(f"JS: Switching to JS rendering for {final_url}")
                         html, rendered_url = JS_RENDERER.render(final_url)
                         if rendered_url:
                             final_url = rendered_url
@@ -337,7 +339,7 @@ class Worker(threading.Thread):
                         blocked_rule += 1
                         continue
 
-                    if not _allowed_domain(self.seed_url, u, current_url=final_url):
+                    if not _allowed_domain(self.original_site_url, u, current_url=final_url):
                         with self.block_lock:
                             self.block_report["DOMAIN_FILTER"]["count"] += 1
                             if len(self.block_report["DOMAIN_FILTER"]["urls"]) < 5:
@@ -345,7 +347,7 @@ class Worker(threading.Thread):
                         blocked_domain += 1
                         continue
 
-                    if self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.seed_url):
+                    if self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.original_site_url):
                         enqueued += 1
                     else:
                         self.frontier_duplicate_count += 1
@@ -359,7 +361,7 @@ class Worker(threading.Thread):
                 import traceback
                 self.error(f"ERROR {url}: {e}\n{traceback.format_exc()}")
             finally:
-                self.frontier.mark_visited(url, got_task=got_task, preference_url=self.seed_url)
+                self.frontier.mark_visited(url, got_task=got_task, preference_url=self.original_site_url)
 
     def stop(self):
         self.running = False
