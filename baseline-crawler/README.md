@@ -66,6 +66,33 @@ The same HTML content processed in Phase 5 is now routed to the storage engine:
 
 ---
 
+## 🛠️ Technical Specifics & Guardrails
+
+### 🚫 Noise Reduction (Skipped Tags)
+To ensure stable hashes and clean discovery, the crawler's normalization engine (`normalizer.py`) and fingerprinting engine (`content_fingerprint.py`) explicitly strip the following tags:
+*   **`<script>`**: Prevents dynamic IDs or analytics code from breaking hashes.
+*   **`<style>`**: Ignores CSS changes that don't affect semantic content.
+*   **`<noscript>`**: Avoids duplicate content analysis from fallback tags.
+
+### ⏱️ Timeout Configuration
+These values are tuned for **LiteSpeed/Enterprise** servers to avoid "Door hanging" (getting stuck on a response).
+
+| Type | Duration | Logic / File |
+| :--- | :--- | :--- |
+| **HTTP Fetch** | 20s | `REQUEST_TIMEOUT` - Standard `requests.get` limit. |
+| **JS Load** | 30s | `JS_GOTO_TIMEOUT` - Max time for Playwright `page.goto`. |
+| **Hydration** | 8s | `JS_WAIT_TIMEOUT` - Wait for React/Vue to fill the DOM. |
+| **Stability** | 5s | `JS_STABILITY_TIME` - Micro-wait for animations/redirects. |
+| **DB Pool** | 10s | `DB_SEMAPHORE` - Max wait time to acquire a MySQL connection. |
+
+### 💾 Persistence Logic (When DB Writes Happen)
+Data writes are not batched at the end; they happen **atomically** to prevent data loss if a crawl is interrupted:
+1.  **START**: `insert_crawl_job` writes a "pending" row to `crawl_jobs`.
+2.  **DURING**: `insert_crawl_page` (CRAWL mode) or `upsert_baseline_hash` (BASELINE mode) writes to the DB **immediately** after each URL is successfully processed.
+3.  **FINISH**: `complete_crawl_job` updates the job status to "completed" once the Frontier queue hits zero and workers shut down.
+
+---
+
 ## 🏗️ Architecture "The Scene"
 The system is designed to handle **Hybrid Enterprise Stacks** (WordPress + Laravel + SPAs). It uses:
 *   **Playwright**: For full JS rendering (React/Vue/Angular).
