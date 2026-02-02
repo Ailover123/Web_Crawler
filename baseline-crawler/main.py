@@ -15,7 +15,7 @@ import os
 import requests
 import urllib3
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from crawler.frontier import Frontier
@@ -353,7 +353,19 @@ def main():
             max_parallel_sites = args.max_parallel_sites or MAX_PARALLEL_SITES
             logger.info(f"Parallel mode enabled (max {max_parallel_sites} sites at once).")
             with ThreadPoolExecutor(max_workers=max_parallel_sites) as executor:
-                list(executor.map(lambda s: crawl_site(s, args, target_urls), sites))
+                # Submit all tasks
+                future_to_site = {executor.submit(crawl_site, s, args, target_urls): s for s in sites}
+                
+                # Wait for completion with timeout per site
+                # Default 30 minutes (1800s) to allow large sites to finish, but prevent infinite hangs.
+                site_timeout = int(os.getenv("SITE_PROCESS_TIMEOUT", 1800))
+                
+                for future in as_completed(future_to_site):
+                    site = future_to_site[future]
+                    try:
+                        future.result(timeout=site_timeout)
+                    except Exception as e:
+                        logger.error(f"Site {site.get('siteid')} task failed or timed out ({site_timeout}s): {e}")
         else:
             for site in sites:
                 crawl_site(site, args, target_urls)
@@ -382,6 +394,7 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+    import sys
     main()
 
     if SKIP_REPORT:
@@ -400,3 +413,5 @@ if __name__ == "__main__":
             for u in urls[:10]: # Limit print for brevity
                 print(f"  - {u}")
         print("=" * 60)
+    
+    sys.exit(0)
