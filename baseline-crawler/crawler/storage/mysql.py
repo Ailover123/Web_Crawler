@@ -213,16 +213,34 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
     conn = get_connection()
     try:
         cur = conn.cursor()
+        
+        # 1. 🔍 Manual Existence Check (Code-level duplicate prevention)
         cur.execute(
-            """
-            INSERT INTO defacement_sites (siteid, baseline_id, url, action)
-            VALUES (%s,%s,%s,'selected')
-            ON DUPLICATE KEY UPDATE
-                baseline_id=VALUES(baseline_id),
-                action='selected'
-            """,
-            (siteid, baseline_id, canonical_url),
+            "SELECT id FROM defacement_sites WHERE siteid = %s AND url = %s",
+            (siteid, canonical_url)
         )
+        row = cur.fetchone()
+        
+        if row:
+            # 2. 🔄 UPDATE existing record
+            cur.execute(
+                """
+                UPDATE defacement_sites 
+                SET baseline_id = %s, action = 'selected'
+                WHERE id = %s
+                """,
+                (baseline_id, row[0])
+            )
+        else:
+            # 3. 🆕 INSERT new record
+            cur.execute(
+                """
+                INSERT INTO defacement_sites (siteid, baseline_id, url, action)
+                VALUES (%s,%s,%s,'selected')
+                """,
+                (siteid, baseline_id, canonical_url),
+            )
+            
         conn.commit()
     finally:
         cur.close()
