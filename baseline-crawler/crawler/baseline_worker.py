@@ -50,11 +50,43 @@ class BaselineWorker:
             if "text/html" not in ct:
                 return "skipped", f"Not HTML ({ct})", thread_name
 
+            html_content = resp.text
+
+            # ----------------------------------------------------
+            # 🚀 SPA / React Detection & Escalation
+            # ----------------------------------------------------
+            from crawler.js_detect import needs_js_rendering
+            if needs_js_rendering(html_content):
+                try:
+                    # logger.info(f"{thread_name} : [JS-RENDER] Escalating {url} (SPA detected)")
+                    from crawler.js_renderer import render_js_sync
+                    rendered_html, final_url = render_js_sync(fetch_url)
+                    
+                    if rendered_html and len(rendered_html) > len(html_content):
+                        html_content = rendered_html
+                        # logger.info(f"{thread_name} : [JS-RENDER] Success for {url} ({len(html_content)} bytes)")
+                except Exception as e:
+                    logger.warning(f"{thread_name} : [JS-RENDER] Failed for {url}: {e}")
+            
+            # ----------------------------------------------------
+            # 🔗 Base Tag Injection (Fixes broken CSS/Images locally)
+            # ----------------------------------------------------
+            if "<base" not in html_content.lower():
+                import re
+                # Insert <base> immediately after <head>
+                html_content = re.sub(
+                    r"(<head[^>]*>)",
+                    rf'\1<base href="{fetch_url}">',
+                    html_content,
+                    count=1,
+                    flags=re.IGNORECASE
+                )
+
             baseline_id, path, action = save_baseline(
                 custid=self.custid,
                 siteid=self.siteid,
                 url=url,              # IMPORTANT: DB identity
-                html=resp.text,
+                html=html_content,
                 base_url=self.seed_url,
             )
 
