@@ -25,8 +25,10 @@ class BaselineWorker:
         self.seed_url = seed_url
         self.target_urls = target_urls
 
-        # IMPORTANT: keep this <= MYSQL_POOL_SIZE
-        self.max_workers = 5
+        # Use MAX_WORKERS from config, but ensure we don't exceed reasonable limits
+        # relative to the DB pool size if running mainly in parallel.
+        from crawler.config import MAX_WORKERS
+        self.max_workers = MAX_WORKERS
 
     # ------------------------------------------------------------
     # Worker function (runs in thread pool)
