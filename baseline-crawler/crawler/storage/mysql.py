@@ -1,3 +1,4 @@
+#mysql
 from mysql.connector.pooling import MySQLConnectionPool
 from mysql.connector import Error
 import os
@@ -23,13 +24,31 @@ pool = MySQLConnectionPool(
 )
 
 
-def get_connection():
-    DB_SEMAPHORE.acquire()
+import time
+from crawler.logger import logger
+
+def get_connection(timeout: int = 10):
+    """
+    Acquire a DB connection with a timeout.
+    Prevents silent deadlocks when DB_SEMAPHORE is exhausted.
+    """
+    acquired = DB_SEMAPHORE.acquire(timeout=timeout)
+
+    if not acquired:
+        logger.error(
+            "[DB] Semaphore acquire timeout after "
+            f"{timeout}s — possible connection starvation or deadlock"
+        )
+        raise RuntimeError(
+            "DB semaphore timeout: too many concurrent DB operations"
+        )
+
     try:
         return pool.get_connection()
     except Exception:
         DB_SEMAPHORE.release()
         raise
+
 
 
 def check_db_health():
