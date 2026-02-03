@@ -46,7 +46,7 @@ assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE")
 GLOBAL_TOTAL_URLS = 0
 GLOBAL_START_TIME = time.time()
 LAST_ACTIVITY_TIME = time.time()
-WATCHDOG_TIMEOUT = 120  # 2 minutes hard timeout for inactivity
+WATCHDOG_TIMEOUT = 900  # 15 minutes hard timeout for inactivity
 
 def watchdog_thread():
     """Kills the process if no activity is detected for WATCHDOG_TIMEOUT seconds."""
@@ -151,10 +151,11 @@ def crawl_site(site, args, target_urls=None):
             job_logger.info(f"[MODE] BASELINE (offline refetch from DB for siteid={siteid})")
             
             # Since BaselineWorker currently hardcodes max_workers=5
-            worker_count = 5
-            for i in range(worker_count):
-                job_logger.info(f"Worker-{i} : started (BASELINE)")
-            job_logger.info(f"Started {worker_count} workers.")
+            # Use MAX_WORKERS from config
+            from crawler.config import MAX_WORKERS
+            worker_count = MAX_WORKERS
+            logger.info(f"Worker-X : started (BASELINE) x{worker_count}")
+            logger.info(f"Started {worker_count} workers.")
 
             stats = BaselineWorker(
                 custid=custid,
@@ -172,6 +173,7 @@ def crawl_site(site, args, target_urls=None):
 
             job_logger.info("-" * 60)
             job_logger.info("BASELINE GENERATION COMPLETED")
+            job_logger.info(f"Site URL          : {original_site_url}")
             job_logger.info("-" * 60)
             job_logger.info(f"Baselines Created : {stats.get('created', 0)}")
             job_logger.info(f"Baselines Updated : {stats.get('updated', 0)}")
