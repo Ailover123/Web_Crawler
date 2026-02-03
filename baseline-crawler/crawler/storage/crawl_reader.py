@@ -23,11 +23,12 @@ def iter_crawl_urls(*, siteid: int):
             """,
             (siteid,),
         )
-
-        for (url,) in cur:
-            yield url
-
+        # Fetch all to memory to release DB connection immediately
+        urls = [row[0] for row in cur.fetchall()]
     finally:
         cur.close()
         conn.close()
         DB_SEMAPHORE.release()
+
+    for url in urls:
+        yield url
