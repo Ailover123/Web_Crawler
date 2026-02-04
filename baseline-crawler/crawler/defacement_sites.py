@@ -14,7 +14,7 @@ def get_selected_defacement_rows():
         cur = conn.cursor(dictionary=True)
         cur.execute(
             """
-            SELECT siteid, url, baseline_id
+            SELECT siteid, url, baseline_id, threshold
             FROM defacement_sites
             WHERE action = 'selected'
             """
