@@ -186,7 +186,15 @@ def crawl_site(site, args, target_urls=None):
         # CRAWL / COMPARE MODE (LIVE DISCOVERY)
         # ====================================================
         frontier = Frontier()
-        frontier.enqueue(start_url, None, 0, preference_url=original_site_url)
+        
+        if target_urls:
+             # Targeting specific pages only - do not seed the whole site
+             for t_url in target_urls:
+                 frontier.enqueue(t_url, None, 0, preference_url=original_site_url)
+             job_logger.info(f"Targeting {len(target_urls)} specific URL(s). Site walking disabled.")
+        else:
+             # Default: Seed with start_url to crawl entire site
+             frontier.enqueue(start_url, None, 0, preference_url=original_site_url)
 
         workers = []
         siteid_map = {siteid: siteid}
@@ -203,6 +211,7 @@ def crawl_site(site, args, target_urls=None):
                 original_site_url=original_site_url,
                 skip_report=site_skip_report,
                 skip_lock=site_skip_lock,
+                target_urls=target_urls,
             )
             w.start()
             workers.append(w)
@@ -233,6 +242,7 @@ def crawl_site(site, args, target_urls=None):
                             original_site_url=original_site_url,
                             skip_report=site_skip_report,
                             skip_lock=site_skip_lock,
+                            target_urls=target_urls,
                         )
                         w.start()
                         workers.append(w)
@@ -300,11 +310,12 @@ def main():
     # ... (existing parser args code) ...
     parser = argparse.ArgumentParser(description="Web Crawler / Baseline Tool")
     parser.add_argument("--siteid", type=int, nargs='+', help="Crawl one or more specific Site IDs")
+    parser.add_argument("--baseline_id", "--baselineid", type=str, dest="baseline_id", help="Run only for this specific BASELINE ID")
     parser.add_argument("--custid", type=int, nargs='+', help="Crawl all sites for one or more specific Customer IDs")
-    parser.add_argument("--baseline_id", type=str, help="Run only for this specific BASELINE ID")
     parser.add_argument("--parallel", action="store_true", help="Crawl multiple sites in parallel")
     parser.add_argument("--max_parallel_sites", type=int, help="Override MAX_PARALLEL_SITES limit")
     parser.add_argument("--log", action="store_true", help="Enable file logging for each job")
+
     args = parser.parse_args()
 
     # Start Watchdog
@@ -321,24 +332,33 @@ def main():
 
     logger.info("MySQL health check passed.")
 
-    sites = fetch_enabled_sites()
-    if not sites:
-        logger.info("No enabled sites found.")
-        return
-
-    # ---------------- FILTER SITES ----------------
     target_urls = None
     
     if args.baseline_id:
+        # Priority: Fetch specific baseline info directly (bypassing enabled check if needed)
         info = fetch_site_info_by_baseline_id(args.baseline_id)
         if not info:
              logger.error(f"Baseline ID '{args.baseline_id}' not found in defacement_sites.")
              return
+        
         target_siteid = info["siteid"]
         target_urls = [info["url"]]
-        sites = [s for s in sites if s["siteid"] == target_siteid]
-        logger.info(f"--> Targeting specific Baseline ID: {args.baseline_id} (Site {target_siteid})")
+        
+        # Construct site object manually from the DB info
+        sites = [{
+            "siteid": info["siteid"], 
+            "custid": info["custid"], 
+            "url": info["url"]
+        }]
+        logger.info(f"--> Targeting specific Baseline ID: {args.baseline_id} (Site {target_siteid}, Cust {info['custid']})")
+    
     else:
+        # Standard Mode: Fetch all enabled sites
+        sites = fetch_enabled_sites()
+        if not sites:
+            logger.info("No enabled sites found.")
+            return
+
         if args.siteid:
             sites = [s for s in sites if s["siteid"] in args.siteid]
         if args.custid:
