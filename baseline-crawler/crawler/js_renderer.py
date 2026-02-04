@@ -55,7 +55,11 @@ def _render_loop():
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0 Safari/537.36"
-                )
+                ),
+                viewport={
+                    "width": 1024,
+                    "height": 768
+                }
             )
             
             logger.info("[JS-RENDER] Dedicated render thread started.")
