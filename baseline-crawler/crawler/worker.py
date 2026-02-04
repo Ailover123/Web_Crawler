@@ -120,6 +120,7 @@ class Worker(threading.Thread):
         original_site_url=None,   # ✅ DB identity
         skip_report=None,
         skip_lock=None,
+        target_urls=None,
     ):
         super().__init__(name=name)
         self.frontier = frontier
@@ -138,6 +139,8 @@ class Worker(threading.Thread):
         self.existed_count = 0
         self.policy_skipped_count = 0
         self.frontier_duplicate_count = 0
+
+        self.target_urls = target_urls # If present, disables recursive crawling
 
         self.compare_engine = (
             CompareEngine(custid=self.custid)
@@ -297,7 +300,11 @@ class Worker(threading.Thread):
                     continue
 
                 html = resp.text
-                urls, _ = extract_urls(html, final_url)
+                
+                if self.target_urls:
+                    urls = []
+                else:
+                    urls, _ = extract_urls(html, final_url)
 
                 if not urls and needs_js_rendering(html):
                     cached = get_cached_render(final_url)
@@ -310,7 +317,9 @@ class Worker(threading.Thread):
                         if rendered_url:
                             final_url = rendered_url
                         set_cached_render(final_url, html)
-                    urls, _ = extract_urls(html, final_url)
+                    
+                    if not self.target_urls:
+                        urls, _ = extract_urls(html, final_url)
 
                 # ---------------- MODE LOGIC ----------------
                 if self.crawl_mode == "BASELINE":
