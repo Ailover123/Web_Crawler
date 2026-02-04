@@ -153,7 +153,7 @@ def normalize_html(html: str) -> str:
     soup = BeautifulSoup(html, "lxml")
 
     # Remove noisy tags
-    for tag in soup(["script", "style", "noscript"]):
+    for tag in soup(["noscript"]):
         tag.decompose()
 
     # Normalize whitespace
