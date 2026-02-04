@@ -214,7 +214,7 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
     try:
         cur = conn.cursor()
         
-        # 1. 🔍 Manual Existence Check (Code-level duplicate prevention)
+        # 1. Manual Existence Check (Code-level duplicate prevention)
         cur.execute(
             "SELECT id FROM defacement_sites WHERE siteid = %s AND url = %s",
             (siteid, canonical_url)
@@ -222,7 +222,7 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
         row = cur.fetchone()
         
         if row:
-            # 2. 🔄 UPDATE existing record
+            # 2. UPDATE existing record
             cur.execute(
                 """
                 UPDATE defacement_sites 
@@ -232,7 +232,7 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
                 (baseline_id, row[0])
             )
         else:
-            # 3. 🆕 INSERT new record
+            # 3. INSERT new record
             cur.execute(
                 """
                 INSERT INTO defacement_sites (siteid, baseline_id, url, action)
@@ -346,9 +346,10 @@ def fetch_site_info_by_baseline_id(baseline_id):
         cur = conn.cursor(dictionary=True)
         cur.execute(
             """
-            SELECT siteid, url
-            FROM defacement_sites
-            WHERE baseline_id=%s
+            SELECT d.siteid, d.url, s.custid 
+            FROM defacement_sites d
+            JOIN sites s ON d.siteid = s.siteid
+            WHERE d.baseline_id=%s
             """,
             (baseline_id,),
         )
@@ -408,6 +409,26 @@ def insert_observed_page(
             ),
         )
         conn.commit()
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+        DB_SEMAPHORE.release()
+
+
+def fetch_observed_page(site_id, normalized_url):
+    """
+    Fetch the last known observed state of a page.
+    Used to skip re-processing if the hash hasn't changed.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            "SELECT observed_hash FROM observed_pages WHERE site_id=%s AND normalized_url=%s",
+            (site_id, normalized_url),
+        )
+        return cur.fetchone()
     finally:
         cur.close()
         conn.close()
