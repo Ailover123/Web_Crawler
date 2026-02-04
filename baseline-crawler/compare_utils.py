@@ -2,7 +2,8 @@
 import difflib
 from pathlib import Path
 from html import escape
-from bs4 import BeautifulSoup, NavigableString, Tag
+import re
+from bs4 import BeautifulSoup, NavigableString, Tag, Comment
 
 DEFAULT_CONTEXT = 5
 
@@ -11,37 +12,175 @@ DEFAULT_CONTEXT = 5
 # HTML-AWARE NORMALIZATION
 # ============================================================
 
-def _html_to_semantic_lines(html: str):
+# ============================================================
+# IGNORED ATTRIBUTES & TAGS
+# ============================================================
+
+IGNORED_ATTR_PATTERNS = {
+    # Exact matches
+    "nonce", "value", "floatingButtonsClickTracking", 
+    "aria-controls", "aria-labelledby", "data-smartmenus-id", 
+    "id", "name", "cb", 
+    
+    # Common dynamic patterns
+    "data-csrf", "csrf-token", "authenticity_token", 
+    "__VIEWSTATE", "__EVENTVALIDATION", "_token",
+}
+
+SUFFIX_PATTERNS = {
+    "nonce",  # covers *nonce
+}
+
+IGNORED_TAGS = {
+    "base", # Frequently changes environment-to-environment or is injected
+}
+
+PREFIX_PATTERNS = {
+    "data-aos", "data-wow", "data-framer", "data-scroll", "aria-hidden"
+}
+
+IGNORED_STYLE_PROPERTIES = {
+    "transition", "transform", "animation", "will-change", "opacity",
+    "transition-duration", "transition-delay", "transition-timing-function",
+    "animation-duration", "animation-delay", "animation-iteration-count"
+}
+
+def should_ignore_attr(attr_name: str) -> bool:
+    """Check if an attribute should be ignored based on patterns."""
+    if attr_name in IGNORED_ATTR_PATTERNS:
+        return True
+    
+    for suffix in SUFFIX_PATTERNS:
+        if attr_name.endswith(suffix):
+            return True
+
+    for prefix in PREFIX_PATTERNS:
+        if attr_name.startswith(prefix):
+            return True
+            
+    return False
+
+
+def _normalize_style(style_str: str) -> str:
+    """
+    Parse inline style, remove ignored properties, and return robust sorted string.
+    """
+    if not style_str:
+        return ""
+        
+    # Split by semicolon to get declarations
+    declarations = [d.strip() for d in style_str.split(";") if d.strip()]
+    
+    valid_decls = {}
+    
+    for decl in declarations:
+        if ":" not in decl:
+            continue
+        key, val = decl.split(":", 1)
+        key = key.strip().lower()
+        val = val.strip()
+        
+        # Filter dynamic animation properties
+        is_ignored = False
+        for ignored_prop in IGNORED_STYLE_PROPERTIES:
+            # Check for exact match or vendor prefix match (e.g. -webkit-transform)
+            if key == ignored_prop or key.endswith("-" + ignored_prop):
+                is_ignored = True
+                break
+        
+        if not is_ignored:
+            # Collapse whitespace in value
+            val = " ".join(val.split())
+            valid_decls[key] = val
+            
+    if not valid_decls:
+        return ""
+
+    return "; ".join(f"{k}: {v}" for k, v in sorted(valid_decls.items()))
+
+
+# ============================================================
+# HTML-AWARE NORMALIZATION
+# ============================================================
+
+def _html_to_semantic_lines(html: str) -> list[str]:
     """
     Convert HTML into semantic, whitespace-stable lines.
     Formatting-only differences are eliminated here.
+    Attributes matching IGNORED_ATTR_PATTERNS are skipped.
+    Tags matching IGNORED_TAGS are skipped.
     """
     soup = BeautifulSoup(html, "lxml")
+    
+    # Pre-emptive strip of ignored tags to prevent them from breaking structure/lines
+    for tag_name in IGNORED_TAGS:
+        for match in soup.find_all(tag_name):
+            match.decompose()
+
     lines = []
 
     def walk(node, depth=0):
-        indent = "  " * depth
+
+        if isinstance(node, Comment):
+            return
 
         if isinstance(node, NavigableString):
-            text = " ".join(str(node).split())
+            text = str(node)
+            # Aggressive normalization for code blocks to handle minification differences
+            if node.parent and node.parent.name in ("script", "style"):
+                # Collapse whitespace around operators: "width: 100px" -> "width:100px"
+                text = re.sub(r'\s*([{}()\[\]:;,=+\-*/%&|<>!^?~"\'`])\s*', r'\1', text)
+            
+            # Standard normalization for all text (collapses multiple spaces to one)
+            text = " ".join(text.split())
+
             if text:
-                lines.append(indent + text)
+                lines.append(text)
 
         elif isinstance(node, Tag):
-            # normalize attributes (sorted)
+            # normalize attributes (sorted and filtered)
+            # normalize attributes (sorted and filtered)
+            valid_attrs = {}
+            CASE_INSENSITIVE_ATTRS = {"charset", "lang", "type", "method", "rel", "media", "http-equiv"}
+            
+            for k, v in node.attrs.items():
+                if should_ignore_attr(k):
+                    continue
+                
+                # Handle list-type attributes (like class) vs string
+                if isinstance(v, list):
+                    v = " ".join(v)
+                
+                v = str(v)
+                
+                # Special handling for style attribute
+                if k.lower() == "style":
+                    v = _normalize_style(v)
+                    if not v:
+                        continue
+                
+                # Case-insensitive normalization for specific attributes
+                if k.lower() in CASE_INSENSITIVE_ATTRS:
+                    v = v.lower()
+                
+                # Collapse whitespace
+                v = " ".join(v.split())
+                
+                valid_attrs[k] = v
+
             attrs = " ".join(
-                f'{k}="{ " ".join(v) if isinstance(v, list) else v }"'
-                for k, v in sorted(node.attrs.items())
+                f'{k}="{v}"'
+                for k, v in sorted(valid_attrs.items())
             )
 
             open_tag = f"<{node.name}{(' ' + attrs) if attrs else ''}>"
-            lines.append(indent + open_tag)
+            lines.append(open_tag)
 
             for child in node.children:
                 walk(child, depth + 1)
 
             close_tag = f"</{node.name}>"
-            lines.append(indent + close_tag)
+            lines.append(close_tag)
 
     for child in soup.contents:
         walk(child)
@@ -288,34 +427,8 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 import difflib
 
 
-def _html_to_semantic_lines(html: str) -> list[str]:
-    soup = BeautifulSoup(html, "lxml")
-    lines = []
 
-    def walk(node, depth=0):
-        indent = "  " * depth
 
-        if isinstance(node, NavigableString):
-            text = " ".join(str(node).split())
-            if text:
-                lines.append(indent + text)
-
-        elif isinstance(node, Tag):
-            attrs = " ".join(
-                f'{k}="{ " ".join(v) if isinstance(v, list) else v }"'
-                for k, v in sorted(node.attrs.items())
-            )
-            lines.append(indent + f"<{node.name}{(' ' + attrs) if attrs else ''}>")
-
-            for child in node.children:
-                walk(child, depth + 1)
-
-            lines.append(indent + f"</{node.name}>")
-
-    for c in soup.contents:
-        walk(c)
-
-    return lines
 
 
 def calculate_defacement_percentage(
