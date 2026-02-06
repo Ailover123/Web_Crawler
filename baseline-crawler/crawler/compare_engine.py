@@ -70,16 +70,19 @@ class CompareEngine:
         # --------------------------------------------------
         # Optimization: skip if same content already seen
         # --------------------------------------------------
-        # try:
-        #     prev = fetch_observed_page(siteid, canon_url)
-        #     if prev and prev["observed_hash"] == observed_hash:
-        #         logger.info(
-        #             f"[COMPARE] [SKIP] No content change since last check "
-        #             f"(hash={observed_hash[:8]}...)"
-        #         )
-        #         return
-        # except Exception as e:
-        #     logger.warning(f"[COMPARE] Previous state check failed: {e}")
+        # --------------------------------------------------
+        # Optimization: skip if same content already seen
+        # --------------------------------------------------
+        try:
+            prev = fetch_observed_page(siteid, canon_url)
+            if prev and prev["observed_hash"] == observed_hash:
+                logger.info(
+                    f"[COMPARE] [SKIP] No content change since last check "
+                    f"(hash={observed_hash[:8]}...)"
+                )
+                return
+        except Exception as e:
+            logger.warning(f"[COMPARE] Previous state check failed: {e}")
 
         logger.info(f"[COMPARE] Checking {url}")
         logger.info(f"[COMPARE] Canonical URL: {canon_url}")
@@ -94,6 +97,9 @@ class CompareEngine:
             row_canon = _canon(row["url"])
             row_slash = row_canon if row_canon.endswith("/") else row_canon + "/"
             row_noslash = row_canon.rstrip("/")
+
+            if row["siteid"] != siteid:
+                continue
 
             if (
                 canon_url != row_canon
@@ -187,7 +193,14 @@ class CompareEngine:
                 diff_dir = DIFF_ROOT / str(self.custid) / str(siteid)
                 diff_dir.mkdir(parents=True, exist_ok=True)
 
-                diff_path = diff_dir / f"{baseline_id}.html"
+                # User Request: Time-based unique naming to avoid overwrites
+                # datetime.now().strftime("%H%M%S%d%m%Y") -> 16040006022026 (Time+Date)
+                ts_str = datetime.now().strftime("%H%M%S%d%m%Y")
+                
+                # Format: 16040006022026.93275-1.html
+                # This ensures every run gets a new file if hash changed
+                diff_filename = f"{ts_str}.{baseline_id}"
+                diff_path = diff_dir / f"{diff_filename}.html"
 
                 checked_at_ist = (datetime.now() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S IST")
 
@@ -196,7 +209,7 @@ class CompareEngine:
                     html_a=old_html,
                     html_b=html,
                     out_dir=diff_dir,
-                    file_prefix=str(baseline_id),
+                    file_prefix=diff_filename,
                     severity=severity,
                     score=score,
                     checked_at=checked_at_ist,
