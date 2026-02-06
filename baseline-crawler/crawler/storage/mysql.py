@@ -133,8 +133,10 @@ def fail_crawl_job(job_id, err):
 
 
 def insert_crawl_page(data):
-    # 🛡️ Safety check: Prevent any crawl_pages insertions during BASELINE mode
+    # 🛡️ Safety check: Prevent insertions during specific modes
     crawl_mode = os.getenv("CRAWL_MODE", "CRAWL").upper()
+    
+    # BASELINE: Strict block (should use BaselineWorker instead)
     if crawl_mode == "BASELINE":
         from crawler.logger import logger
         logger.warning(
@@ -142,6 +144,10 @@ def insert_crawl_page(data):
             f"This operation is prohibited. URL: {data.get('url')}"
         )
         return None
+
+    # COMPARE: Soft block (simulate success to allow crawler to proceed)
+    if crawl_mode == "COMPARE":
+        return {"action": "Skipped", "id": 0}
     
     # Pass seed_url if available to ensure domain matches sites table
     base_url = data.get("base_url")
