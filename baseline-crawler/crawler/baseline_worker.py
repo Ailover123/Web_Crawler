@@ -43,7 +43,7 @@ class BaselineWorker:
 
             result = fetch(fetch_url)
             if not result["success"]:
-                return "failed", f"Fetch failed: {result.get('error')}", thread_name
+                return "failed", f"Fetch failed for site={self.siteid} url={url}: {result.get('error')}", thread_name
 
             resp = result["response"]
             ct = resp.headers.get("Content-Type", "").lower()
@@ -93,7 +93,7 @@ class BaselineWorker:
             return action, f"id={baseline_id} url={url}", thread_name
 
         except Exception as e:
-            return "failed", f"Exception: {e}", thread_name
+            return "failed", f"Exception for site={self.siteid} url={url}: {e}", thread_name
 
     # ------------------------------------------------------------
     # Main entry
