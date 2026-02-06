@@ -27,7 +27,7 @@ def should_enqueue(url: str) -> bool:
 
 class Frontier:
     def __init__(self):
-        self.queue = Queue(maxsize=10_000)
+        self.queue = Queue(maxsize=0)
         self.visited = set()
         self.in_progress = set()
         self.discovered = set()
@@ -37,22 +37,16 @@ class Frontier:
 
     # ---------------- ENQUEUE ----------------
     def enqueue(self, url, discovered_from=None, depth=0, preference_url=None) -> bool:
+        normalized = normalize_url(url, preference_url=preference_url)
+
         with self.lock:
             if not should_enqueue(url):
                 return False
-
-            normalized = normalize_url(url, preference_url=preference_url)
 
             if normalized in self.visited or normalized in self.in_progress:
                 return False
 
             self.in_progress.add(normalized)
-            try:
-                self.queue.put((normalized, discovered_from, depth))
-            except Exception:
-                self.in_progress.discard(normalized)
-                return False
-
             self.discovered.add(normalized)
 
             try:
@@ -67,7 +61,14 @@ class Frontier:
                 except Exception:
                     pass
 
+        # 🚀 Path outside the lock to avoid blocking other threads during enqueue
+        try:
+            self.queue.put((normalized, discovered_from, depth))
             return True
+        except Exception:
+            with self.lock:
+                self.in_progress.discard(normalized)
+            return False
 
     # ---------------- DEQUEUE ----------------
     def dequeue(self):

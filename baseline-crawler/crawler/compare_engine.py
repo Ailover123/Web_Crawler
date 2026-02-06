@@ -6,6 +6,7 @@ from crawler.storage.baseline_reader import get_baseline_hash
 from crawler.storage.mysql import insert_observed_page, fetch_observed_page
 from crawler.defacement_sites import get_selected_defacement_rows
 from crawler.logger import logger
+from datetime import datetime, timedelta
 
 from compare_utils import (
     generate_html_diff,
@@ -188,12 +189,17 @@ class CompareEngine:
 
                 diff_path = diff_dir / f"{baseline_id}.html"
 
+                checked_at_ist = (datetime.now() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S IST")
+
                 generate_html_diff(
                     url=url,
                     html_a=old_html,
                     html_b=html,
                     out_dir=diff_dir,
                     file_prefix=str(baseline_id),
+                    severity=severity,
+                    score=score,
+                    checked_at=checked_at_ist,
                 )
 
             # --------------------------------------------------

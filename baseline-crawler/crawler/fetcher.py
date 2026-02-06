@@ -10,9 +10,10 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from crawler.config import USER_AGENT, REQUEST_TIMEOUT
 from crawler.logger import logger
+from crawler.throttle import set_pause
 
 
-def fetch(url, discovered_from=None, depth=0):
+def fetch(url, discovered_from=None, depth=0, siteid=None):
     """
     Fetch a URL and return structured result.
     Includes exponential backoff for HTTP 429 (Rate Limit).
@@ -38,12 +39,19 @@ def fetch(url, discovered_from=None, depth=0):
             response_size = len(r.content)
             content_type = r.headers.get("Content-Type", "").lower()
 
-            if r.status_code == 429 and attempt < max_retries:
-                logger.warning(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Waiting {retry_delay}s...")
-                time.sleep(retry_delay)
-                retry_delay *= 2
-                logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
-                continue
+            if r.status_code == 429:
+                # Trigger global pause for all workers of this site immediately
+                set_pause(siteid, 5)
+                
+                if attempt < max_retries:
+                    logger.warning(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Global 5s pause set. Waiting locally for {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
+                    continue
+                else:
+                    logger.error(f"429 Rate Limit persisted for {url} after {max_retries} retries. Final 5s pause.")
+                    time.sleep(5)
 
             if 200 <= r.status_code < 300:
                 if "text/html" in content_type or "application/json" in content_type:

@@ -29,6 +29,13 @@ def setup_logger(name="crawler", log_file=None, level=logging.INFO):
     if logger.handlers:
         return logger
 
+    # Child loggers (job, worker) should propagate to the root 'crawler' logger
+    if name != "crawler":
+        logger.propagate = True
+        # Ensure 'crawler' is setup if it hasn't been
+        setup_logger("crawler", log_file=log_file, level=level)
+        return logger
+
     formatter = CompanyFormatter()
 
     # Console handler
@@ -37,6 +44,7 @@ def setup_logger(name="crawler", log_file=None, level=logging.INFO):
     logger.addHandler(console_handler)
 
     # File handler (optional)
+    # Only the root 'crawler' logger gets a FileHandler
     if log_file:
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(formatter)

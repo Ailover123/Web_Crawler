@@ -46,8 +46,8 @@ def normalize_url(
 
     parsed = urlparse(url)
 
-    # Force HTTPS
-    scheme = "https"
+    # Preserve scheme if present, default to https if missing
+    scheme = parsed.scheme or "https"
     netloc = parsed.netloc.lower()
 
     # Apply domain preference (www vs non-www)
@@ -65,7 +65,9 @@ def normalize_url(
         base_pref = clean_pref[4:] if clean_pref.startswith("www.") else clean_pref
 
         if base_netloc == base_pref:
-            netloc = pref.netloc.lower() # Force exact match to preference
+            # Only match if we are absolutely sure they are the same domain
+            # But let's be less aggressive about forcing preference.
+            pass 
 
     # Standardize path
     path = parsed.path if parsed.path else "/"
@@ -107,33 +109,39 @@ def get_canonical_id(url: str, base_url: str | None = None) -> str:
     if not url:
         return ""
 
-    # First normalize fully
+    # First normalize fully (to handle relative paths, trailing slashes, etc.)
     url = normalize_url(url, preference_url=base_url)
     parsed = urlparse(url)
 
     netloc = parsed.netloc.lower()
 
-    # Enforce base_url domain if equivalent
+    # Determine site's WWW preference from base_url (original_site_url)
     if base_url:
         base_parsed = urlparse(
-            normalize_url(base_url)
+            base_url if "://" in base_url else "https://" + base_url
         )
-
+        base_netloc = base_parsed.netloc.lower()
+        
+        # Check if the registered site has www.
+        pref_has_www = base_netloc.startswith("www.")
+        
+        # Check if current URL's netloc matches the base domain (ignoring www)
         clean_netloc = netloc[4:] if netloc.startswith("www.") else netloc
-        clean_base = (
-            base_parsed.netloc.lower()[4:]
-            if base_parsed.netloc.lower().startswith("www.")
-            else base_parsed.netloc.lower()
-        )
-
+        clean_base = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc
+        
         if clean_netloc == clean_base:
-            netloc = base_parsed.netloc.lower()
+            # Force the netloc to match the preference (with or without www)
+            if pref_has_www and not netloc.startswith("www."):
+                netloc = "www." + netloc
+            elif not pref_has_www and netloc.startswith("www."):
+                netloc = netloc[4:]
 
-    path = parsed.path.strip("/")
+    path = parsed.path
     query = f"?{parsed.query}" if parsed.query else ""
 
-    if path:
-        return f"{netloc}/{path}{query}"
+    # Return scheme-less URL: 'domain/path?query'
+    if path and path != "/":
+        return f"{netloc}{path}{query}"
     else:
         return f"{netloc}{query}"
 
@@ -142,6 +150,22 @@ def get_canonical_id(url: str, base_url: str | None = None) -> str:
 # HTML NORMALIZATION (HASHING / DIFF ONLY)
 # ============================================================
 
+import re
+
+# Patterns to strip from HTML to avoid noisy diffs (e.g. dynamic nonces, IDs, etc.)
+SKIP_PATTERNS = [
+    re.compile(r'(?i)"[^"]*nonce[^"]*"\s*:\s*["\'](?:[^"\\]|\\.)*["\']'),
+    re.compile(r'(?i)\b[\w:-]*nonce[\w:-]*\s*=\s*["\'](?:[^"\\]|\\.)*["\']'),
+    re.compile(r'(?i)\bvalue\s*=\s*["\'](?:[^"\\]|\\.)*["\']'),
+    re.compile(r'(?i)"floatingButtonsClickTracking"\s*:\s*["\'](?:[^"\\]|\\.)*["\']'),
+    re.compile(r'(?i)\baria-controls\s*=\s*["\'][^"\']*["\']'),
+    re.compile(r'(?i)\baria-labelledby\s*=\s*["\'][^"\']*["\']'),
+    re.compile(r'(?i)\bdata-smartmenus-id\s*=\s*["\'][^"\']*["\']'),
+    re.compile(r'(?i)\bid\s*=\s*["\'][^"\']*["\']'),
+    re.compile(r'(?i)\bname\s*=\s*["\'][^"\']*["\']'),
+    re.compile(r'(?i)\bcb\s*=\s*["\'][^"\']*["\']'),
+]
+
 def normalize_html(html: str) -> str:
     """
     Normalize HTML ONLY for hashing / comparison.
@@ -149,6 +173,10 @@ def normalize_html(html: str) -> str:
     """
     if not html:
         return ""
+
+    # Apply skip patterns to remove dynamic noise
+    for pattern in SKIP_PATTERNS:
+        html = pattern.sub('', html)
 
     soup = BeautifulSoup(html, "lxml")
 

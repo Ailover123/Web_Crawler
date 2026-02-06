@@ -17,6 +17,7 @@ from crawler.logger import logger
 from crawler.js_detect import needs_js_rendering
 from crawler.render_cache import get_cached_render, set_cached_render
 from crawler.js_render_worker import JSRenderWorker
+from crawler.throttle import get_remaining_pause, set_pause
 
 JS_RENDERER = JSRenderWorker()
 
@@ -136,6 +137,7 @@ class Worker(threading.Thread):
 
         self.saved_count = 0
         self.failed_count = 0
+        self.failed_429_count = 0
         self.existed_count = 0
         self.policy_skipped_count = 0
         self.frontier_duplicate_count = 0
@@ -205,6 +207,13 @@ class Worker(threading.Thread):
         self.info(f"started ({self.crawl_mode})")
 
         while self.running:
+            # --- GLOBAL DOMAIN PAUSE CHECK ---
+            remaining = get_remaining_pause(self.siteid)
+            if remaining > 0:
+                self.info(f"Global Pause active for site {self.siteid}. Waiting {remaining:.1f}s more...")
+                time.sleep(1.0) # Check every 1s to be efficient
+                continue
+
             (item, got_task) = self.frontier.dequeue()
             if not got_task:
                 time.sleep(0.1)
@@ -218,7 +227,7 @@ class Worker(threading.Thread):
             try:
                 self.info(f"Crawling {url}")
                 fetch_url = force_www_url(url)
-                result = fetch(fetch_url, parent, depth)
+                result = fetch(fetch_url, parent, depth, siteid=self.siteid)
                 fetched_at = datetime.now()
 
                 if not result["success"]:
@@ -256,7 +265,13 @@ class Worker(threading.Thread):
                                 result["final_url"] = final_url
                     
                     if not result["success"]:
+                        if "http error: 429" in str(err).lower():
+                            set_pause(self.siteid, 5)
+                            self.warning("429 detected. Initiating 5s DOMAIN-WIDE PAUSE for all site workers.")
+                        
                         self.error(f"Fetch failed for {url}: {err}")
+                        if "429" in result["error"]:
+                            self.failed_429_count += 1
                         self.failed_count += 1
                         continue
 
@@ -299,7 +314,9 @@ class Worker(threading.Thread):
                 if "text/html" not in ct:
                     continue
 
-                html = resp.text
+                # Optimization: Explicitly decode as utf-8 (ignoring errors) to avoid slow 
+                # automatic encoding detection in requests (especially on large HTML like Cricbuzz).
+                html = resp.content.decode('utf-8', errors='ignore')
                 
                 if self.target_urls:
                     urls = []
