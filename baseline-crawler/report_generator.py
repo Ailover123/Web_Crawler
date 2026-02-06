@@ -20,7 +20,7 @@ def generate_report():
     print("Generating Static Report...")
     
     # Setup directories
-    base_dir = Path("/home/priti/Web-Crawler/Web_Crawler/baseline-crawler/")
+    base_dir = Path(__file__).resolve().parent
     reports_dir = base_dir / "reports"
     reports_dir.mkdir(exist_ok=True)
     
