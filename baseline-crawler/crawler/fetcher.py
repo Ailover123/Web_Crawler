@@ -10,22 +10,46 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from crawler.config import USER_AGENT, REQUEST_TIMEOUT
 from crawler.logger import logger
-from crawler.throttle import set_pause
+from crawler.throttle import set_pause, get_remaining_pause
 
 
 def fetch(url, discovered_from=None, depth=0, siteid=None):
     """
     Fetch a URL and return structured result.
     Includes exponential backoff for HTTP 429 (Rate Limit).
+    Checks for global pauses before starting.
     """
+    # --- GLOBAL PAUSE CHECK ---
+    if siteid:
+        remaining = get_remaining_pause(siteid)
+        if remaining > 0:
+            logger.info(f"[THROTTLE] Pre-fetch pause active for site {siteid}. Waiting {remaining:.1f}s...")
+            time.sleep(remaining)
+
     max_retries = 3
-    retry_delay = 5  # Increased from 2s to 5s as requested
+    retry_delay = 5
 
     for attempt in range(max_retries + 1):
+        if siteid and attempt > 0:
+            remaining = get_remaining_pause(siteid)
+            if remaining > 0:
+                logger.info(f"[THROTTLE] Global pause detected during retry for site {siteid}. Waiting {remaining:.1f}s...")
+                time.sleep(remaining)
+
         start_time = time.time()
         try:
+            # More realistic browser headers to avoid 406/403
             headers = {
-                "User-Agent": USER_AGENT
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
             }
             r = requests.get(
                 url,

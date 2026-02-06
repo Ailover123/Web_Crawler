@@ -265,12 +265,8 @@ class Worker(threading.Thread):
                                 result["final_url"] = final_url
                     
                     if not result["success"]:
-                        if "http error: 429" in str(err).lower():
-                            set_pause(self.siteid, 5)
-                            self.warning("429 detected. Initiating 5s DOMAIN-WIDE PAUSE for all site workers.")
-                        
                         self.error(f"Fetch failed for {url}: {err}")
-                        if "429" in result["error"]:
+                        if "429" in str(err):
                             self.failed_429_count += 1
                         self.failed_count += 1
                         continue

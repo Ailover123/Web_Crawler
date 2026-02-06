@@ -78,6 +78,12 @@ def extract_urls(html, base_url):
                 href = "https://" + temp_href.lstrip('/')
 
         url = strip_fragment(urljoin(base_url, href))
+        
+        # FIX: Handle entity corruption (e.g., &region -> ®ion)
+        # Some HTML parsers decode &reg without the semicolon.
+        if "®" in url:
+            url = url.replace("®", "&reg")
+
         if _is_allowed_url(url, base_domain):
             urls.append(url)
 
