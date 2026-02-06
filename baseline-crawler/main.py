@@ -114,7 +114,7 @@ def crawl_site(site, args, target_urls=None):
     """
     Crawls a single site. This function can be called sequentially or in parallel.
     """
-    global GLOBAL_TOTAL_URLS, GLOBAL_SUCCESS, GLOBAL_429_ERRORS, GLOBAL_OTHER_ERRORS
+    global GLOBAL_TOTAL_URLS, GLOBAL_SUCCESS, GLOBAL_429_ERRORS, GLOBAL_OTHER_ERRORS, LAST_ACTIVITY_TIME
     siteid = site["siteid"]
     custid = site["custid"]
 
@@ -307,6 +307,9 @@ def crawl_site(site, args, target_urls=None):
 
                 if unfinished == 0:
                     break
+                
+                # HEARTBEAT: Keep watchdog happy while we are working
+                LAST_ACTIVITY_TIME = time.time()
                     
         finally:
             # 🛑 CRITICAL: Always signal workers to stop and wait for them
@@ -321,6 +324,10 @@ def crawl_site(site, args, target_urls=None):
                     # Wait in small chunks to allow logging if it takes too long
                     while w.is_alive():
                         w.join(timeout=2)
+                        
+                        # HEARTBEAT during cleanup
+                        LAST_ACTIVITY_TIME = time.time()
+
                         elapsed = time.time() - start_join
                         if elapsed > 15:
                              job_logger.warning(f"Thread {w.name} is taking exceptionally long to terminate ({elapsed:.1f}s). System may be hanging.")
@@ -411,6 +418,8 @@ def main():
     t.start()
     logger.info(f"Watchdog active: Force kill if inactivity > {WATCHDOG_TIMEOUT}s")
 
+    file_handler = None # Initialize to avoid NameError in finally block
+
     # ... (existing db check and site fetching) ...
 
     # ---------------- DB CHECK ----------------
@@ -467,9 +476,13 @@ def main():
         log_filename = f"{CRAWL_MODE}_{datetime.now().strftime('%H%M%S')}.log"
         log_path = os.path.join(log_dir, log_filename)
         
-        # This will add the FileHandler once to the base 'crawler' logger
-        from crawler.logger import setup_logger
-        setup_logger("crawler", log_file=log_path)
+        # Manually attach FileHandler since setup_logger returns early if handlers exist
+        import logging
+        from crawler.logger import CompanyFormatter
+        
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setFormatter(CompanyFormatter())
+        logger.addHandler(file_handler)
         
         logger.info(f"--- Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
         logger.info(f"Log file: {log_path}")
