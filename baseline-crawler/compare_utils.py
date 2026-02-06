@@ -45,6 +45,10 @@ IGNORED_STYLE_PROPERTIES = {
     "animation-duration", "animation-delay", "animation-iteration-count"
 }
 
+# Tags that trigger a score boost if their content changes
+CRITICAL_TAGS = {"title", "h1"}
+CRITICAL_BOOST = 1.0  # Percentage points to add if critical content changes
+
 def should_ignore_attr(attr_name: str) -> bool:
     """Check if an attribute should be ignored based on patterns."""
     if attr_name in IGNORED_ATTR_PATTERNS:
@@ -431,12 +435,33 @@ import difflib
 
 
 
+def _extract_critical_content(html: str) -> dict[str, str]:
+    """
+    Extract text content from critical tags.
+    Returns: {'title': 'Page Title', 'h1': 'Header Text'}
+    """
+    soup = BeautifulSoup(html or "", "lxml")
+    content = {}
+    
+    for tag_name in CRITICAL_TAGS:
+        # Find first occurrence (usually the most important one)
+        tag = soup.find(tag_name)
+        if tag:
+            # Normalize whitespace
+            text = " ".join(tag.get_text().split())
+            content[tag_name] = text
+            
+    return content
+
+
 def calculate_defacement_percentage(
     baseline_html: str,
     observed_html: str,
+    threshold: float = 1.0,
 ) -> float:
     """
     Returns defacement percentage (0.0 – 100.0)
+    Includes a boost for critical tag changes (title, h1) IF score < threshold.
     """
     base_lines = _html_to_semantic_lines(baseline_html)
     obs_lines = _html_to_semantic_lines(observed_html)
@@ -444,6 +469,7 @@ def calculate_defacement_percentage(
     if not base_lines:
         return 100.0 if obs_lines else 0.0
 
+    # 1. Standard Diff Score
     sm = difflib.SequenceMatcher(None, base_lines, obs_lines)
 
     changed = 0
@@ -456,7 +482,27 @@ def calculate_defacement_percentage(
             changed += (j2 - j1)
 
     pct = (changed / len(base_lines)) * 100
-    return round(min(100.0, pct), 2)
+    
+    # Optimization: If we already exceeded the threshold, don't pretend to inspect critical tags
+    # The user is already alerted.
+    if pct >= threshold:
+        return round(min(100.0, pct), 2)
+
+    # 2. Critical Content Boost
+    base_critical = _extract_critical_content(baseline_html)
+    obs_critical = _extract_critical_content(observed_html)
+    
+    boost = 0.0
+    for tag in CRITICAL_TAGS:
+        b_text = base_critical.get(tag, "")
+        o_text = obs_critical.get(tag, "")
+        
+        # If content exists in both but differs -> BOOST
+        if b_text and o_text and b_text != o_text:
+            boost += CRITICAL_BOOST
+            
+    final_score = min(100.0, pct + boost)
+    return round(final_score, 2)
 
 
 def semantic_hash(html: str) -> str:
