@@ -1,10 +1,7 @@
 from pathlib import Path
 
-from crawler.normalizer import (
-    normalize_html,
-    get_canonical_id,
-)
-from crawler.hasher import sha256
+from crawler.content_fingerprint import semantic_hash
+from crawler.normalizer import get_canonical_id
 from crawler.storage.baseline_reader import get_baseline_hash
 from crawler.storage.mysql import insert_observed_page, fetch_observed_page
 from crawler.defacement_sites import get_selected_defacement_rows
@@ -54,8 +51,8 @@ class CompareEngine:
         if not html:
             return
 
-        # 🔑 CANONICAL HTML (CRITICAL FIX)
-        html = normalize_html(html)
+        # 🔑 Raw HTML is processed by semantic_hash and calculate_defacement_percentage
+        # No pre-normalization needed (and it can cause hash mismatches vs DB)
 
         rows = self._load_rows()
         if not rows:
@@ -66,7 +63,8 @@ class CompareEngine:
         canon_slash = canon_url if canon_url.endswith("/") else canon_url + "/"
         canon_noslash = canon_url.rstrip("/")
 
-        observed_hash = sha256(html)
+        # Use semantic_hash to match what baseline_store uses (DB consistency)
+        observed_hash = semantic_hash(html)
 
         # --------------------------------------------------
         # Optimization: skip if same content already seen
@@ -161,28 +159,24 @@ class CompareEngine:
                 )
                 continue
 
-            # 🔑 Baseline HTML is already normalized on disk
+            # 🔑 Baseline HTML is from disk (raw)
             old_html = baseline_path.read_text(
                 encoding="utf-8",
                 errors="ignore",
             )
+            # NOTE: We compare RAW vs RAW. semantic_hash logic inside calculate_defacement_percentage handles normalization.
 
             # --------------------------------------------------
             # Defacement scoring (normalized vs normalized)
             # --------------------------------------------------
-            score = calculate_defacement_percentage(old_html, html)
+            score = calculate_defacement_percentage(old_html, html, threshold)
 
             if score < threshold:
                 severity = "NONE"
-                logger.info(
-                    f"[COMPARE] Defacement score {score}% < threshold {threshold}% — ignored"
-                )
+                logger.info(f"[COMPARE] {score}% (below threshold {threshold}%) — Ignored")
             else:
                 severity = defacement_severity(score)
-
-            logger.info(
-                f"[COMPARE] Defacement score={score}% severity={severity}"
-            )
+                logger.warning(f"[COMPARE] *** DEFACEMENT *** Score={score}% Severity={severity}")
 
             # --------------------------------------------------
             # Diff generation (ONE file per baseline page)
@@ -221,11 +215,6 @@ class CompareEngine:
                     logger.info("[COMPARE] DB insert successful (changed)")
                 except Exception as e:
                     logger.error(f"[COMPARE] DB insert failed (changed): {e}")
-
-            logger.warning(
-                f"[COMPARE] *** DEFACEMENT RESULT *** "
-                f"url={url} score={score}% severity={severity}"
-            )
 
         if not matched:
             logger.info(
