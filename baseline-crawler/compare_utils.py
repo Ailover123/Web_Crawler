@@ -108,19 +108,19 @@ def _normalize_style(style_str: str) -> str:
 # HTML-AWARE NORMALIZATION
 # ============================================================
 
-def _html_to_semantic_lines(html: str) -> list[str]:
+def _html_to_semantic_lines(html: str, strip_noise: bool = True) -> list[str]:
     """
     Convert HTML into semantic, whitespace-stable lines.
-    Formatting-only differences are eliminated here.
-    Attributes matching IGNORED_ATTR_PATTERNS are skipped.
-    Tags matching IGNORED_TAGS are skipped.
+    strip_noise=True: Removes ignored attrs/tags (for scoring).
+    strip_noise=False: Keeps them (for visual diff).
     """
     soup = BeautifulSoup(html, "lxml")
     
-    # Pre-emptive strip of ignored tags to prevent them from breaking structure/lines
-    for tag_name in IGNORED_TAGS:
-        for match in soup.find_all(tag_name):
-            match.decompose()
+    if strip_noise:
+        # Pre-emptive strip of ignored tags to prevent them from breaking structure/lines
+        for tag_name in IGNORED_TAGS:
+            for match in soup.find_all(tag_name):
+                match.decompose()
 
     lines = []
 
@@ -159,12 +159,11 @@ def _html_to_semantic_lines(html: str) -> list[str]:
 
         elif isinstance(node, Tag):
             # normalize attributes (sorted and filtered)
-            # normalize attributes (sorted and filtered)
             valid_attrs = {}
             CASE_INSENSITIVE_ATTRS = {"charset", "lang", "type", "method", "rel", "media", "http-equiv"}
             
             for k, v in node.attrs.items():
-                if should_ignore_attr(k):
+                if strip_noise and should_ignore_attr(k):
                     continue
                 
                 # Handle list-type attributes (like class) vs string
@@ -366,9 +365,9 @@ def generate_html_diff(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # HTML-aware normalization
-    a_lines = _html_to_semantic_lines(html_a)
-    b_lines = _html_to_semantic_lines(html_b)
+    # HTML-aware normalization but KEEP noise for display
+    a_lines = _html_to_semantic_lines(html_a, strip_noise=False)
+    b_lines = _html_to_semantic_lines(html_b, strip_noise=False)
 
     ranges = _collect_change_ranges(a_lines, b_lines, context_lines)
 
@@ -881,7 +880,7 @@ def calculate_defacement_percentage(
         if tag == "insert":
             changed += (j2 - j1)
 
-    pct = (changed / len(base_lines)) * 100
+    pct = (changed / len(base_lines)) * 100 
     
     # Optimization: If we already exceeded the threshold, don't pretend to inspect critical tags
     # The user is already alerted.
@@ -907,7 +906,7 @@ def calculate_defacement_percentage(
 
 def semantic_hash(html: str) -> str:
     """
-    Generate a SHA256 hash of the semantic content of the HTML.
+    Generate a hash of the semantic content of the HTML.
     Stable against whitespace and attribute ordering changes.
     """
     import hashlib
