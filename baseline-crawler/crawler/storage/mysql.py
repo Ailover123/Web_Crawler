@@ -168,23 +168,36 @@ def insert_crawl_page(data):
             affected_id = row[0]
         else:
             # 3. 🆕 INSERT: Doesn't exist, so insert fresh
-            cur.execute(
-                """
-                INSERT INTO crawl_pages
-                (job_id, custid, siteid, url, parent_url, depth, status_code,
-                 content_type, content_length, response_time_ms, fetched_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """,
-                (
-                    data["job_id"], data["custid"], data["siteid"],
-                    canonical_url, data["parent_url"], data["depth"],
-                    data["status_code"], data["content_type"],
-                    data["content_length"], data["response_time_ms"],
-                    data["fetched_at"]
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO crawl_pages
+                    (job_id, custid, siteid, url, parent_url, depth, status_code,
+                     content_type, content_length, response_time_ms, fetched_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        data["job_id"], data["custid"], data["siteid"],
+                        canonical_url, data["parent_url"], data["depth"],
+                        data["status_code"], data["content_type"],
+                        data["content_length"], data["response_time_ms"],
+                        data["fetched_at"]
+                    )
                 )
-            )
-            action = "Inserted"
-            affected_id = cur.lastrowid
+                action = "Inserted"
+                affected_id = cur.lastrowid
+            except mysql.connector.errors.IntegrityError as e:
+                if e.errno == 1062: # Duplicate entry
+                    # 🛡️ RACE CONDITION: Another worker inserted this URL since our SELECT
+                    action = "Existed"
+                    cur.execute(
+                        "SELECT id FROM crawl_pages WHERE siteid = %s AND url = %s",
+                        (data["siteid"], canonical_url)
+                    )
+                    row = cur.fetchone()
+                    affected_id = row[0] if row else 0
+                else:
+                    raise e
 
         conn.commit()
 
@@ -331,6 +344,22 @@ def site_has_baselines(site_id):
         cur = conn.cursor()
         cur.execute(
             "SELECT 1 FROM baseline_pages WHERE site_id=%s LIMIT 1",
+            (site_id,),
+        )
+        return cur.fetchone() is not None
+    finally:
+        cur.close()
+        conn.close()
+        DB_SEMAPHORE.release()
+
+
+def has_site_crawl_data(site_id):
+    """Checks if crawl_pages already has entries for this site."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM crawl_pages WHERE siteid=%s LIMIT 1",
             (site_id,),
         )
         return cur.fetchone() is not None

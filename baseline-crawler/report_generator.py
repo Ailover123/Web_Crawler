@@ -25,9 +25,14 @@ def generate_report():
     reports_dir.mkdir(exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    report_filename = f"report_{timestamp}.html"
-    report_path = reports_dir / report_filename
     latest_path = reports_dir / "latest_report.html"
+
+    # Cleanup: Remove old timestamped report files to keep directory clean
+    for old_report in reports_dir.glob("report_*.html"):
+        try:
+            old_report.unlink()
+        except Exception:
+            pass
 
     try:
         conn = get_connection()
@@ -477,13 +482,9 @@ def generate_report():
 </html>
 """
 
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(html_template)
-    
     with open(latest_path, "w", encoding="utf-8") as f:
         f.write(html_template)
 
-    print(f"Report Generated: {report_path}")
     print(f"Updated Latest: {latest_path}")
 
 if __name__ == "__main__":
