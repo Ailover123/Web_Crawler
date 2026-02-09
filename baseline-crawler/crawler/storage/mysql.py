@@ -133,10 +133,8 @@ def fail_crawl_job(job_id, err):
 
 
 def insert_crawl_page(data):
-    # 🛡️ Safety check: Prevent insertions during specific modes
+    # 🛡️ Safety check: Prevent any crawl_pages insertions during BASELINE mode
     crawl_mode = os.getenv("CRAWL_MODE", "CRAWL").upper()
-    
-    # BASELINE: Strict block (should use BaselineWorker instead)
     if crawl_mode == "BASELINE":
         from crawler.logger import logger
         logger.warning(
@@ -145,10 +143,6 @@ def insert_crawl_page(data):
         )
         return None
 
-    # COMPARE: Soft block (simulate success to allow crawler to proceed)
-    if crawl_mode == "COMPARE":
-        return {"action": "Skipped", "id": 0}
-    
     # Pass seed_url if available to ensure domain matches sites table
     base_url = data.get("base_url")
     canonical_url = get_canonical_id(data["url"], base_url)
@@ -196,10 +190,10 @@ def insert_crawl_page(data):
 
         if action == "Inserted":
             from crawler.logger import logger
-            logger.debug(f"DB: Inserted {canonical_url} (ID: {affected_id})")
+            logger.info(f"DB: Inserted {canonical_url} (ID: {affected_id})")
         elif action == "Updated":
             from crawler.logger import logger
-            logger.debug(f"DB: Updated {canonical_url} (ID: {affected_id})")
+            logger.info(f"DB: Updated {canonical_url} (ID: {affected_id})")
 
         return {
             "action": action,
@@ -388,6 +382,19 @@ def insert_observed_page(
     conn = get_connection()
     try:
         cur = conn.cursor()
+        
+        # 1. 🔍 Optimization: Check if current DB hash matches observed hash to avoid redundant write
+        cur.execute(
+            "SELECT observed_hash FROM observed_pages WHERE site_id=%s AND normalized_url=%s",
+            (site_id, canonical_url)
+        )
+        row = cur.fetchone()
+        
+        if row and row[0] == observed_hash:
+            # Hash unchanged - SKIP write
+            # (If we wanted to update 'checked_at', we would do a small UPDATE here, but user asked to avoid inserts)
+            return
+
         cur.execute(
             """
             INSERT INTO observed_pages
@@ -431,7 +438,11 @@ def fetch_observed_page(site_id, normalized_url):
     try:
         cur = conn.cursor(dictionary=True)
         cur.execute(
-            "SELECT observed_hash FROM observed_pages WHERE site_id=%s AND normalized_url=%s",
+            """
+            SELECT observed_hash, baseline_id, defacement_score, defacement_severity
+            FROM observed_pages 
+            WHERE site_id=%s AND normalized_url=%s
+            """,
             (site_id, normalized_url),
         )
         return cur.fetchone()
