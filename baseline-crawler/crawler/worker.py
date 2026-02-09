@@ -122,6 +122,8 @@ class Worker(threading.Thread):
         skip_report=None,
         skip_lock=None,
         target_urls=None,
+        compare_results=None,  # New param for collecting results
+        compare_lock=None,
     ):
         super().__init__(name=name)
         self.frontier = frontier
@@ -134,6 +136,9 @@ class Worker(threading.Thread):
         self.original_site_url = original_site_url
         self.skip_report = skip_report if skip_report is not None else SKIP_REPORT
         self.skip_lock = skip_lock if skip_lock is not None else SKIP_LOCK
+        
+        self.compare_results = compare_results
+        self.compare_lock = compare_lock
 
         self.saved_count = 0
         self.failed_count = 0
@@ -346,11 +351,19 @@ class Worker(threading.Thread):
                     self.info(f"DB: {action.upper()} baseline {baseline_id}")
 
                 elif self.crawl_mode == "COMPARE":
-                    self.compare_engine.handle_page(
+                    results = self.compare_engine.handle_page(
                         siteid=self.siteid,
                         url=self._db_url(url),
                         html=html,
                     )
+                    
+                    if results and self.compare_results is not None:
+                        # Append to global results
+                        if self.compare_lock:
+                            with self.compare_lock:
+                                self.compare_results.extend(results)
+                        else:
+                            self.compare_results.extend(results)
 
                 enqueued = 0
                 skipped_rule = 0
