@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timedelta
 
 from crawler.content_fingerprint import semantic_hash
 from crawler.normalizer import get_canonical_id
@@ -6,7 +7,6 @@ from crawler.storage.baseline_reader import get_baseline_hash
 from crawler.storage.mysql import insert_observed_page, fetch_observed_page
 from crawler.defacement_sites import get_selected_defacement_rows
 from crawler.logger import logger
-from datetime import datetime, timedelta
 
 from compare_utils import (
     generate_html_diff,
@@ -17,11 +17,20 @@ from compare_utils import (
 DIFF_ROOT = Path("diffs")
 
 
-def _canon(url: str) -> str:
+# --------------------------------------------------
+# CANONICAL URL HANDLING (FIXED)
+# --------------------------------------------------
+
+def _canon(url: str, base_url: str | None = None) -> str:
     """
     Canonical URL used for DB + compare matching.
+
+    IMPORTANT:
+    base_url MUST be passed so that:
+      - www vs non-www is normalized
+      - redirects do not break identity
     """
-    return get_canonical_id(url)
+    return get_canonical_id(url, base_url=base_url)
 
 
 class CompareEngine:
@@ -52,54 +61,36 @@ class CompareEngine:
         if not html:
             return
 
-        # 🔑 Raw HTML is processed by semantic_hash and calculate_defacement_percentage
-        # No pre-normalization needed (and it can cause hash mismatches vs DB)
-
         rows = self._load_rows()
         if not rows:
             logger.info(f"[COMPARE] No defacement rows configured. Skipping {url}")
-            return
+            return []
 
-        canon_url = _canon(url)
+        # 🔑 Canonical URL (FIXED)
+        canon_url = _canon(url, base_url)
         canon_slash = canon_url if canon_url.endswith("/") else canon_url + "/"
         canon_noslash = canon_url.rstrip("/")
 
-        # Use semantic_hash to match what baseline_store uses (DB consistency)
+        # Hash MUST match baseline_store (semantic_hash)
         observed_hash = semantic_hash(html)
 
-        # --------------------------------------------------
-        # Optimization: skip if same content already seen
-        # --------------------------------------------------
-        # --------------------------------------------------
-        # Optimization: skip if same content already seen
-        # --------------------------------------------------
-        try:
-            prev = fetch_observed_page(siteid, canon_url)
-            if prev and prev["observed_hash"] == observed_hash:
-                logger.info(
-                    f"[COMPARE] [SKIP] No content change since last check "
-                    f"(hash={observed_hash[:8]}...)"
-                )
-                return
-        except Exception as e:
-            logger.warning(f"[COMPARE] Previous state check failed: {e}")
 
-        logger.info(f"[COMPARE] Checking {url}")
-        logger.info(f"[COMPARE] Canonical URL: {canon_url}")
-        logger.info(f"[COMPARE] Observed hash: {observed_hash}")
+        if observed_hash: 
+             logger.debug(f"[COMPARE] Observed hash: {observed_hash}")
+        # logger.info(f"[COMPARE] Checking {url}")
+        # logger.info(f"[COMPARE] Canonical URL: {canon_url}")
 
         matched = False
+        results_summary = []
 
         # --------------------------------------------------
         # Match against defacement_sites
         # --------------------------------------------------
         for row in rows:
-            row_canon = _canon(row["url"])
+            row_base = row.get("base_url")
+            row_canon = _canon(row["url"], row_base)
             row_slash = row_canon if row_canon.endswith("/") else row_canon + "/"
             row_noslash = row_canon.rstrip("/")
-
-            if row["siteid"] != siteid:
-                continue
 
             if (
                 canon_url != row_canon
@@ -152,6 +143,14 @@ class CompareEngine:
                     )
                 except Exception as e:
                     logger.warning(f"[COMPARE] DB insert failed (unchanged): {e}")
+                
+                results_summary.append({
+                    "baseline_id": baseline_id,
+                    "url": url,
+                    "score": 0.0,
+                    "severity": "NONE",
+                    "status": "UNCHANGED"
+                })
                 continue
 
             # --------------------------------------------------
@@ -166,24 +165,35 @@ class CompareEngine:
                 )
                 continue
 
-            # 🔑 Baseline HTML is from disk (raw)
             old_html = baseline_path.read_text(
                 encoding="utf-8",
                 errors="ignore",
             )
-            # NOTE: We compare RAW vs RAW. semantic_hash logic inside calculate_defacement_percentage handles normalization.
 
             # --------------------------------------------------
-            # Defacement scoring (normalized vs normalized)
+            # Defacement scoring
             # --------------------------------------------------
-            score = calculate_defacement_percentage(old_html, html, threshold)
+            score = calculate_defacement_percentage(old_html, html)
 
             if score < threshold:
                 severity = "NONE"
-                logger.info(f"[COMPARE] {score}% (below threshold {threshold}%) — Ignored")
+                logger.info(
+                    f"[COMPARE] {score}% below threshold {threshold}% — ignored"
+                )
+                
+                # Report as IGNORED (Unchanged effectively)
+                results_summary.append({
+                    "baseline_id": baseline_id,
+                    "url": url,
+                    "score": score,
+                    "severity": "NONE",  # Force NONE
+                    "status": f"IGNORED (<{threshold}%)"
+                })
             else:
                 severity = defacement_severity(score)
-                logger.warning(f"[COMPARE] *** DEFACEMENT *** Score={score}% Severity={severity}")
+                logger.warning(
+                    f"[COMPARE] *** DEFACEMENT *** Score={score}% Severity={severity}"
+                )
 
             # --------------------------------------------------
             # Diff generation (ONE file per baseline page)
@@ -193,30 +203,29 @@ class CompareEngine:
                 diff_dir = DIFF_ROOT / str(self.custid) / str(siteid)
                 diff_dir.mkdir(parents=True, exist_ok=True)
 
-                # User Request: Time-based unique naming to avoid overwrites
-                # datetime.now().strftime("%H%M%S%d%m%Y") -> 16040006022026 (Time+Date)
-                ts_str = datetime.now().strftime("%H%M%S%d%m%Y")
-                
-                # Format: 16040006022026.93275-1.html
-                # This ensures every run gets a new file if hash changed
-                diff_filename = f"{ts_str}.{baseline_id}"
-                diff_path = diff_dir / f"{diff_filename}.html"
+                # Generate new filename with timestamp
+                timestamp = datetime.now().strftime("%H%M%S%d%m%Y")
+                new_prefix = f"{timestamp}-{baseline_id}"
 
-                checked_at_ist = (datetime.now() + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d %H:%M:%S IST")
+                diff_path = diff_dir / f"{new_prefix}.html"
+
+                checked_at_ist = (
+                    datetime.now() + timedelta(hours=5, minutes=30)
+                ).strftime("%Y-%m-%d %H:%M:%S IST")
 
                 generate_html_diff(
                     url=url,
                     html_a=old_html,
                     html_b=html,
                     out_dir=diff_dir,
-                    file_prefix=diff_filename,
+                    file_prefix=new_prefix,
                     severity=severity,
                     score=score,
                     checked_at=checked_at_ist,
                 )
 
             # --------------------------------------------------
-            # Persist result (only if not suppressed)
+            # Persist result
             # --------------------------------------------------
             if severity != "NONE":
                 try:
@@ -235,7 +244,19 @@ class CompareEngine:
                 except Exception as e:
                     logger.error(f"[COMPARE] DB insert failed (changed): {e}")
 
+            # Collect summary data
+            results_summary.append({
+                "baseline_id": baseline_id,
+                "url": url,
+                "score": score,
+                "severity": severity,
+                "status": "CHANGED" if severity != "NONE" else "IGNORED"
+            })
+
         if not matched:
             logger.info(
-                f"[COMPARE] URL not listed in defacement_sites — skipped"
+                "[COMPARE] URL not listed in defacement_sites — skipped "
+                "(canonicalization mismatch fixed)"
             )
+
+        return results_summary
