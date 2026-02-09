@@ -62,6 +62,10 @@ SUMMARY_LOCK = threading.Lock() # 🔒 Atomic logging for summary tables
 GLOBAL_SESSIONS = [] # Tracks (siteid, url, visited, duration, alerts_count)
 WATCHDOG_TIMEOUT = 900  # 15 minutes hard timeout for inactivity
 
+# Global Compare Results (Session Summary)
+GLOBAL_COMPARE_RESULTS = []
+COMPARE_LOCK = threading.Lock()
+
 def watchdog_thread():
     """Kills the process if no activity is detected for WATCHDOG_TIMEOUT seconds."""
     while True:
@@ -264,6 +268,8 @@ def crawl_site(site, args, target_urls=None):
                     skip_report=site_skip_report,
                     skip_lock=site_skip_lock,
                     target_urls=target_urls,
+                    compare_results=GLOBAL_COMPARE_RESULTS,
+                    compare_lock=COMPARE_LOCK,
                 )
                 w.start()
                 workers.append(w)
@@ -307,6 +313,8 @@ def crawl_site(site, args, target_urls=None):
                             skip_report=site_skip_report,
                             skip_lock=site_skip_lock,
                             target_urls=target_urls,
+                            compare_results=GLOBAL_COMPARE_RESULTS,
+                            compare_lock=COMPARE_LOCK,
                         )
                         w.start()
                         workers.append(w)
@@ -634,6 +642,35 @@ def main():
                         logger.info("\n".join(nl_lines))
 
             logger.info("=" * 60 + "\n")
+            
+            if CRAWL_MODE == "COMPARE" and GLOBAL_COMPARE_RESULTS:
+                logger.info("\n" + "=" * 100)
+                logger.info(f"{'COMPARE MODE DETAILED SUMMARY':^100}")
+                logger.info("=" * 100)
+                
+                # Header
+                logger.info(f"{'BASELINE ID':<25} | {'STATUS':<20} | {'SCORE':<8} | {'SEVERITY':<10} | {'URL'}")
+                logger.info("-" * 100)
+                
+                # Sort by Score DESC (critical first), then Severity
+                # Assign sort priority to severity strings if needed, but score is usually enough.
+                # If score is same (e.g. 0), sort by URL.
+                sorted_results = sorted(
+                    GLOBAL_COMPARE_RESULTS, 
+                    key=lambda x: (x.get('score', 0), x.get('url', '')), 
+                    reverse=True
+                )
+                
+                for r in sorted_results:
+                    b_id = str(r.get('baseline_id', 'N/A'))
+                    status = str(r.get('status', 'UNKNOWN'))
+                    score = f"{r.get('score', 0.0):.1f}%"
+                    sev = str(r.get('severity', 'NONE'))
+                    url = str(r.get('url', ''))
+                    
+                    logger.info(f"{b_id:<25} | {status:<20} | {score:<8} | {sev:<10} | {url}")
+                
+                logger.info("=" * 100 + "\n")
             
             logger.info(f"--- Session ended: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
             
