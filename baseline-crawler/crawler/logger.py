@@ -54,3 +54,10 @@ def setup_logger(name="crawler", log_file=None, level=logging.INFO):
 
 # Global logger instance
 logger = setup_logger()
+
+# --- Environment Checks ---
+try:
+    import brotli
+    logger.info("[SYSTEM] Brotli library found. Decompression enabled.")
+except ImportError:
+    logger.warning("[SYSTEM] Brotli library NOT found. Brotli-encoded responses will fail to decompress.")

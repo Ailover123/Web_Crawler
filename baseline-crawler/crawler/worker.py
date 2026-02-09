@@ -64,14 +64,14 @@ def classify_skip(url: str):
         return "STATIC"
 
     if parsed.query:
-        if re.search(r'(^|&)(e-page-[0-9a-f_A-F]+)=', parsed.query):
-            return "BLOG_EPAGE"
-        for k, r in QUERY_SKIP_RULES.items():
-            if re.search(r, parsed.query.lower()):
-                return k
+        return "QUERY_PARAM"
 
     for k, r in PATH_SKIP_RULES.items():
         if re.search(r, path.lower()):
+            return k
+
+    for k, r in QUERY_SKIP_RULES.items():
+        if re.search(r, parsed.query.lower()):
             return k
 
     return None
@@ -141,7 +141,14 @@ class Worker(threading.Thread):
         self.existed_count = 0
         self.policy_skipped_count = 0
         self.frontier_duplicate_count = 0
+        
+        # --- Advanced Metrics for Summarized Reporting ---
+        self.redirect_count = 0
+        self.js_render_stats = {"total": 0, "success": 0, "failed": 0}
+        self.failure_reasons = defaultdict(int)
 
+        self.new_urls = []
+        self.existed_urls = set() # 🔒 Track unique URLs that already existed in DB
         self.target_urls = target_urls # If present, disables recursive crawling
 
         self.compare_engine = (
@@ -249,9 +256,15 @@ class Worker(threading.Thread):
                                 html = cached
                                 final_url = url # fallback
                             else:
-                                html, final_url = JS_RENDERER.render(url)
-                                if final_url:
-                                    set_cached_render(final_url, html)
+                                self.js_render_stats["total"] += 1
+                                try:
+                                    html, final_url = JS_RENDERER.render(url)
+                                    self.js_render_stats["success"] += 1
+                                    if final_url:
+                                        set_cached_render(final_url, html)
+                                except Exception as js_err:
+                                    self.js_render_stats["failed"] += 1
+                                    raise js_err
 
                             if final_url and final_url != url:
                                 self.info(f"Soft Redirect recovered {url} -> {final_url}")
@@ -266,6 +279,19 @@ class Worker(threading.Thread):
                     
                     if not result["success"]:
                         self.error(f"Fetch failed for {url}: {err}")
+                        
+                        # Track failure reasons for summary
+                        reason = "unknown"
+                        if isinstance(err, str):
+                            if "429" in err: reason = "429 Rate Limit"
+                            elif "404" in err: reason = "404 Not Found"
+                            elif "500" in err: reason = "500 Server Error"
+                            elif "timeout" in err.lower(): reason = "Timeout"
+                            elif "connection" in err.lower(): reason = "Connection Error"
+                            else: reason = err[:30] # Truncate long error strings
+                        
+                        self.failure_reasons[reason] += 1
+                        
                         if "429" in str(err):
                             self.failed_429_count += 1
                         self.failed_count += 1
@@ -276,6 +302,7 @@ class Worker(threading.Thread):
                 final_url = result.get("final_url", url)
 
                 if final_url != url:
+                    self.redirect_count += 1
                     self.info(f"[REDIRECT] {url} -> {final_url}")
 
                 db_result = insert_crawl_page({
@@ -302,9 +329,11 @@ class Worker(threading.Thread):
 
                 if db_action == "Inserted":
                     self.saved_count += 1
+                    self.new_urls.append(url)
                     self.info(f"DB: Inserted {url} (ID: {affected_id})")
                 elif db_action == "Existed":
                     self.existed_count += 1
+                    self.existed_urls.add(final_url)
                     self.info(f"DB: Existed (Not-Touched) {url} (ID: {affected_id})")
                 
                 if "text/html" not in ct:
@@ -326,10 +355,16 @@ class Worker(threading.Thread):
                         html = cached
                     else:
                         self.info(f"JS: Switching to JS rendering for {final_url}")
-                        html, rendered_url = JS_RENDERER.render(final_url)
-                        if rendered_url:
-                            final_url = rendered_url
-                        set_cached_render(final_url, html)
+                        self.js_render_stats["total"] += 1
+                        try:
+                            html, rendered_url = JS_RENDERER.render(final_url)
+                            self.js_render_stats["success"] += 1
+                            if rendered_url:
+                                final_url = rendered_url
+                            set_cached_render(final_url, html)
+                        except Exception as js_err:
+                            self.js_render_stats["failed"] += 1
+                            self.error(f"JS Render failed for {final_url}: {js_err}")
                     
                     if not self.target_urls:
                         urls, _ = extract_urls(html, final_url)

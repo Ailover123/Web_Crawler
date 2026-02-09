@@ -29,6 +29,7 @@ from crawler.storage.db import (
     insert_crawl_job,
     complete_crawl_job,
     fail_crawl_job,
+    has_site_crawl_data
 )
 from crawler.storage.mysql import fetch_site_info_by_baseline_id, site_has_baselines
 from crawler.baseline_worker import BaselineWorker
@@ -57,6 +58,8 @@ GLOBAL_TOTAL_URLS = 0
 GLOBAL_START_TIME = time.time()
 LAST_ACTIVITY_TIME = time.time()
 GLOBAL_LOCK = threading.Lock()
+SUMMARY_LOCK = threading.Lock() # 🔒 Atomic logging for summary tables
+GLOBAL_SESSIONS = [] # Tracks (siteid, url, visited, duration, alerts_count)
 WATCHDOG_TIMEOUT = 900  # 15 minutes hard timeout for inactivity
 
 def watchdog_thread():
@@ -223,6 +226,10 @@ def crawl_site(site, args, target_urls=None):
                   job_logger.warning(f"Site {siteid} has no baselines to compare against. Please run baseline mode first.")
                   return
 
+        # 🛡️ Capture initial state for "NEW LINK FOUND" logic
+        # In CRAWL mode, "existing data" means we have previously crawled this site.
+        initial_has_data = has_site_crawl_data(siteid)
+
         # 🛡️ Seed Skip Check
         from crawler.worker import classify_skip
         skip_reason = classify_skip(start_url)
@@ -344,35 +351,77 @@ def crawl_site(site, args, target_urls=None):
         complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
 
         total_saved = sum(getattr(w, 'saved_count', 0) for w in workers)
-        total_db_existed = sum(getattr(w, 'existed_count', 0) for w in workers)
         total_failed = sum(getattr(w, 'failed_count', 0) for w in workers)
         total_policy_skipped = sum(getattr(w, 'policy_skipped_count', 0) for w in workers)
         total_frontier_skips = sum(getattr(w, 'frontier_duplicate_count', 0) for w in workers)
         total_skipped_rules = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_skip_report.values())
         
+        # 🛡️ Deduplicate "Existed" URLs per site session to match DB row count accurately
+        all_existed_urls = set()
+        for w in workers:
+            all_existed_urls.update(getattr(w, 'existed_urls', set()))
+        total_db_existed = len(all_existed_urls)
+
         total_duplicates = total_db_existed + total_frontier_skips
         total_visited = total_saved + total_duplicates + total_skipped_rules + total_failed + total_policy_skipped
-
-        job_logger.info("-" * 60)
-        job_logger.info(f"CRAWL COMPLETED FOR SITE {siteid}")
         
-        display_crawled = total_saved
-        if CRAWL_MODE == "COMPARE":
-            display_crawled = total_saved + total_db_existed
-            
-        job_logger.info(f"Total URLs Crawled: {display_crawled}")
-        job_logger.info(f"Total URLs Visited: {total_visited}")
-        job_logger.info(f"Duplicates Skipped: {total_duplicates}")
-        job_logger.info(f" (Frontier Skips) : {total_frontier_skips}")
-        job_logger.info(f" (DB Existed)     : {total_db_existed}")
-        job_logger.info(f"Policy Skipped    : {total_policy_skipped}")
-        job_logger.info(f"URLs Skipped      : {total_skipped_rules}")
-        job_logger.info(f"URLs Failed       : {total_failed}")
-        job_logger.info(f"Crawl duration    : {duration:.2f} seconds")
-        job_logger.info(f"Workers used      : {len(workers)}")
-        job_logger.info("-" * 60)
+        # Aggregating metrics from workers
+        total_redirects = sum(getattr(w, 'redirect_count', 0) for w in workers)
+        js_renders = {
+            "total": sum(getattr(w, 'js_render_stats', {}).get("total", 0) for w in workers),
+            "success": sum(getattr(w, 'js_render_stats', {}).get("success", 0) for w in workers),
+            "failed": sum(getattr(w, 'js_render_stats', {}).get("failed", 0) for w in workers)
+        }
+        combined_fails = defaultdict(int)
+        for w in workers:
+            for reason, count in getattr(w, 'failure_reasons', {}).items():
+                combined_fails[reason] += count
+
+        # Collect session data early to be safe
+        all_new_urls = []
+        for w in workers:
+            all_new_urls.extend(getattr(w, 'new_urls', []))
+
+        session_entry = {
+            "custid": custid,
+            "siteid": siteid,
+            "url": original_site_url,
+            "total_attempted": total_visited,
+            "new_saved": total_saved,
+            "db_existed": total_db_existed,
+            "duration": duration,
+            "new_urls": all_new_urls,
+            "has_existing_data": initial_has_data, 
+            "failure_reasons": dict(combined_fails),
+            "alerts": 0 
+        }
+
+        # 1. Performance Summary Table (Consolidated & Atomic)
+        fail_details = ", ".join([f"{k}: {v}" for k, v in combined_fails.items()]) if combined_fails else "None"
+        
+        summary_lines = [
+            f"\n" + "-" * 70,
+            f"SITE {siteid} PERFORMANCE SUMMARY",
+            "-" * 70,
+            f"{'METRIC':<25} | {'COUNT':<7} | {'DETAILS'}",
+            "-" * 70,
+            f"{'Total URLs Attempted':<25} | {total_visited:<7} | (Sum of all attempts below)",
+            f"{'  - Newly Saved':<25} | {total_saved:<7} | (New pages added to DB)",
+            f"{'  - Already in DB':<25} | {total_db_existed:<7} | (Previously crawled/existed)",
+            f"{'  - Redirects':<25} | {total_redirects:<7} | (Found during discovery)",
+            f"{'  - SkipRules/Policy':<25} | {total_skipped_rules + total_policy_skipped:<7} | (Filtered out by config)",
+            f"{'  - Failures':<25} | {total_failed:<7} | (Network/Server errors)",
+            "-" * 70,
+            f"{'JS Rendering':<25} | {js_renders['total']:<7} | (Success: {js_renders['success']} | Failed: {js_renders['failed']})",
+            f"{'Failure Details':<25} | {total_failed:<7} | ({fail_details})",
+            "-" * 70 + "\n"
+        ]
+        
+        with SUMMARY_LOCK:
+            job_logger.info("\n".join(summary_lines))
 
         with GLOBAL_LOCK:
+            GLOBAL_SESSIONS.append(session_entry)
             if CRAWL_MODE == "COMPARE":
                 GLOBAL_TOTAL_URLS += (total_saved + total_db_existed)
             else:
@@ -534,21 +583,62 @@ def main():
     finally:
         if file_handler:
             total_duration = time.time() - GLOBAL_START_TIME
-            logger.info("\n" + "=" * 60)
-            logger.info("           GLOBAL SESSION SUMMARY")
-            logger.info("=" * 60)
-            logger.info(f" Total Sites Processed : {len(sites)}")
-            logger.info(f" Total URLs Audited    : {GLOBAL_TOTAL_URLS}")
-            logger.info(f" Successfully Saved    : {GLOBAL_SUCCESS}")
-            logger.info(f" Rate Limit (429)      : {GLOBAL_429_ERRORS}")
-            logger.info(f" Other Failures        : {GLOBAL_OTHER_ERRORS - GLOBAL_429_ERRORS}")
-            logger.info("-" * 60)
-            logger.info(f" Total Session Time    : {total_duration:.2f} seconds")
-            if total_duration > 0:
-                logger.info(f" Overall Throughput    : {GLOBAL_TOTAL_URLS / total_duration:.2f} URLs/sec")
+            
+            # --- Global Session Performance Table ---
+            if GLOBAL_SESSIONS:
+                table_lines = [
+                    "\n" + "=" * 95,
+                    "           GLOBAL SESSION PERFORMANCE TABLE",
+                    "=" * 95,
+                    f"{'Site ID':<8} | {'URL':<22} | {'Total':<7} | {'New':<5} | {'DB':<5} | {'Failures':<20} | {'Duration':<8}",
+                    "-" * 95
+                ]
+                
+                for s in GLOBAL_SESSIONS:
+                    url_short = (s['url'][:19] + '..') if len(s['url']) > 21 else s['url']
+                    fail_reasons = s.get('failure_reasons', {})
+                    total_f = sum(fail_reasons.values())
+                    f_details = ", ".join([f"{k}:{v}" for k, v in fail_reasons.items()])
+                    f_str = f"{total_f} ({f_details})" if total_f > 0 else "0"
+                    table_lines.append(f"{s['siteid']:<8} | {url_short:<22} | {s['total_attempted']:<7} | {s['new_saved']:<5} | {s['db_existed']:<5} | {f_str:<20} | {s['duration']:>6.1f}s")
+                
+                total_total_attempted = sum(s['total_attempted'] for s in GLOBAL_SESSIONS)
+                total_new_saved = sum(s['new_saved'] for s in GLOBAL_SESSIONS)
+                total_db_existed = sum(s['db_existed'] for s in GLOBAL_SESSIONS)
+                total_failures = sum(sum(s.get('failure_reasons', {}).values()) for s in GLOBAL_SESSIONS)
+
+                table_lines.append("-" * 95)
+                table_lines.append(f"{'TOTAL':<8} | {len(GLOBAL_SESSIONS):<22} | {total_total_attempted:<7} | {total_new_saved:<5} | {total_db_existed:<5} | {total_failures:<20} | {total_duration:>6.1f}s")
+                table_lines.append("=" * 95 + "\n")
+                
+                with SUMMARY_LOCK:
+                    logger.info("\n".join(table_lines))
+
+            # --- New Link Found Summary (CRAWL mode only) ---
+            if CRAWL_MODE == "CRAWL":
+                new_links_found = [s for s in GLOBAL_SESSIONS if s.get("new_urls") and s.get("has_existing_data")]
+                if new_links_found:
+                    nl_lines = [
+                        "\n" + "=" * 60,
+                        "           NEW LINK FOUND",
+                        "=" * 60
+                    ]
+                    for s in new_links_found:
+                        nl_lines.append(f"Cust ID: {s['custid']}, Site ID: {s['siteid']}, Domain: {s['url']}")
+                        for url in s['new_urls']:
+                            nl_lines.append(f"  - {url}")
+                        nl_lines.append("-" * 40)
+                    nl_lines.append("=" * 60 + "\n")
+                    
+                    with SUMMARY_LOCK:
+                        logger.info("\n".join(nl_lines))
+
             logger.info("=" * 60 + "\n")
             
             logger.info(f"--- Session ended: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+            
+            # 🛡️ Ensure everything is written to file before closing
+            file_handler.flush()
             logger.removeHandler(file_handler)
             file_handler.close()
 
