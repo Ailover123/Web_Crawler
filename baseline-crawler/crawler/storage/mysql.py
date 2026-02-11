@@ -2,9 +2,10 @@
 from mysql.connector.pooling import MySQLConnectionPool
 from mysql.connector import Error
 import os
+import mysql.connector
 from dotenv import load_dotenv
 from crawler.storage.db_guard import DB_SEMAPHORE
-from crawler.normalizer import get_canonical_id
+from crawler.processor import LinkUtility
 
 load_dotenv()
 
@@ -25,7 +26,7 @@ pool = MySQLConnectionPool(
 
 
 import time
-from crawler.logger import logger
+from crawler.core import logger
 
 def get_connection(timeout: int = 10):
     """
@@ -136,7 +137,7 @@ def insert_crawl_page(data):
     # 🛡️ Safety check: Prevent any crawl_pages insertions during BASELINE mode
     crawl_mode = os.getenv("CRAWL_MODE", "CRAWL").upper()
     if crawl_mode == "BASELINE":
-        from crawler.logger import logger
+        from crawler.core import logger
         logger.warning(
             f"[SAFETY] Attempted to insert into crawl_pages during BASELINE mode. "
             f"This operation is prohibited. URL: {data.get('url')}"
@@ -145,7 +146,7 @@ def insert_crawl_page(data):
 
     # Pass seed_url if available to ensure domain matches sites table
     base_url = data.get("base_url")
-    canonical_url = get_canonical_id(data["url"], base_url)
+    canonical_url = LinkUtility.get_canonical_id(data["url"], base_url)
     if not canonical_url:
         return None
 
@@ -186,6 +187,12 @@ def insert_crawl_page(data):
                 )
                 action = "Inserted"
                 affected_id = cur.lastrowid
+            except mysql.connector.errors.DataError as e:
+                if e.errno == 1406: # Data too long
+                    from crawler.core import logger
+                    logger.error(f"[DB] Skipping insertion: URL too long for database column ({len(canonical_url)} chars)")
+                    return None
+                raise e
             except mysql.connector.errors.IntegrityError as e:
                 if e.errno == 1062: # Duplicate entry
                     # 🛡️ RACE CONDITION: Another worker inserted this URL since our SELECT
@@ -202,10 +209,10 @@ def insert_crawl_page(data):
         conn.commit()
 
         if action == "Inserted":
-            from crawler.logger import logger
+            from crawler.core import logger
             logger.info(f"DB: Inserted {canonical_url} (ID: {affected_id})")
         elif action == "Updated":
-            from crawler.logger import logger
+            from crawler.core import logger
             logger.info(f"DB: Updated {canonical_url} (ID: {affected_id})")
 
         return {
@@ -219,7 +226,7 @@ def insert_crawl_page(data):
 
 
 def insert_defacement_site(siteid, baseline_id, url, base_url=None):
-    canonical_url = get_canonical_id(url, base_url)
+    canonical_url = LinkUtility.get_canonical_id(url, base_url)
     if not canonical_url:
         return
 
@@ -270,7 +277,7 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
     Insert or UPDATE baseline for a URL.
     Manually checks for existence to handle cases where DB Unique Constraints might be missing.
     """
-    canonical_url = get_canonical_id(normalized_url, base_url)
+    canonical_url = LinkUtility.get_canonical_id(normalized_url, base_url)
     if not canonical_url:
         return False
 
@@ -322,7 +329,7 @@ def fetch_baseline_hash(site_id, normalized_url, base_url=None):
     try:
         cur = conn.cursor(dictionary=True)
         # Use canonical "Domain/Path" for lookup
-        canonical_url = get_canonical_id(normalized_url, base_url)
+        canonical_url = LinkUtility.get_canonical_id(normalized_url, base_url)
         cur.execute(
             """
             SELECT content_hash, baseline_path
@@ -404,7 +411,7 @@ def insert_observed_page(
     defacement_severity=None,
     base_url=None,
 ):
-    canonical_url = get_canonical_id(normalized_url, base_url)
+    canonical_url = LinkUtility.get_canonical_id(normalized_url, base_url)
     if not canonical_url:
         return
 

@@ -1,18 +1,11 @@
 from pathlib import Path
 from datetime import datetime, timedelta
 
-from crawler.content_fingerprint import semantic_hash
-from crawler.normalizer import get_canonical_id
+from crawler.processor import LinkUtility, ContentNormalizer
 from crawler.storage.baseline_reader import get_baseline_hash
 from crawler.storage.mysql import insert_observed_page, fetch_observed_page
 from crawler.defacement_sites import get_selected_defacement_rows
-from crawler.logger import logger
-
-from compare_utils import (
-    generate_html_diff,
-    calculate_defacement_percentage,
-    defacement_severity,
-)
+from crawler.core import logger
 
 DIFF_ROOT = Path("diffs")
 
@@ -22,21 +15,18 @@ DIFF_ROOT = Path("diffs")
 # --------------------------------------------------
 
 def _canon(url: str, base_url: str | None = None) -> str:
-    """
-    Canonical URL used for DB + compare matching.
-
-    IMPORTANT:
-    base_url MUST be passed so that:
-      - www vs non-www is normalized
-      - redirects do not break identity
-    """
-    return get_canonical_id(url, base_url=base_url)
+    return LinkUtility.get_canonical_id(url, base_url=base_url)
 
 
 class CompareEngine:
     def __init__(self, *, custid: int):
         self.custid = custid
         self._rows = None
+        # Relative import for compare_utils if it sits outside crawler/
+        from compare_utils import calculate_defacement_percentage, defacement_severity, generate_html_diff
+        self._percentage_fn = calculate_defacement_percentage
+        self._severity_fn = defacement_severity
+        self._diff_fn = generate_html_diff
 
     # --------------------------------------------------
     # Load defacement targets (cached)
@@ -72,7 +62,7 @@ class CompareEngine:
         canon_noslash = canon_url.rstrip("/")
 
         # Hash MUST match baseline_store (semantic_hash)
-        observed_hash = semantic_hash(html)
+        observed_hash = ContentNormalizer.semantic_hash(html)
 
 
         if observed_hash: 
@@ -173,7 +163,7 @@ class CompareEngine:
             # --------------------------------------------------
             # Defacement scoring
             # --------------------------------------------------
-            score = calculate_defacement_percentage(old_html, html)
+            score = self._percentage_fn(old_html, html)
 
             if score < threshold:
                 severity = "NONE"
@@ -190,7 +180,7 @@ class CompareEngine:
                     "status": f"IGNORED (<{threshold}%)"
                 })
             else:
-                severity = defacement_severity(score)
+                severity = self._severity_fn(score)
                 logger.warning(
                     f"[COMPARE] *** DEFACEMENT *** Score={score}% Severity={severity}"
                 )
@@ -213,7 +203,7 @@ class CompareEngine:
                     datetime.now() + timedelta(hours=5, minutes=30)
                 ).strftime("%Y-%m-%d %H:%M:%S IST")
 
-                generate_html_diff(
+                self._diff_fn(
                     url=url,
                     html_a=old_html,
                     html_b=html,

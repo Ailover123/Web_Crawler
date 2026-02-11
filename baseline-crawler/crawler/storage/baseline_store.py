@@ -7,9 +7,8 @@ from crawler.storage.mysql import (
     fetch_baseline_hash,
     site_has_baselines,
 )
-from crawler.normalizer import normalize_url
-from crawler.content_fingerprint import semantic_hash
-from crawler.logger import logger
+from crawler.processor import LinkUtility, ContentNormalizer
+from crawler.core import logger
 
 import threading
 
@@ -60,9 +59,9 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
     - Creates a new baseline_id only once per URL
     """
 
-    normalized_url = normalize_url(url, preference_url=base_url)
+    normalized_url = LinkUtility.normalize_url(url, preference_url=base_url)
 
-    content_hash = semantic_hash(html)
+    content_hash = ContentNormalizer.semantic_hash(html)
 
     site_dir = BASELINE_ROOT / str(custid) / str(siteid)
     site_dir.mkdir(parents=True, exist_ok=True)

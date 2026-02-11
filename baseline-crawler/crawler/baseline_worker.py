@@ -3,12 +3,11 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-from crawler.fetcher import fetch
+from crawler.processor import PageFetcher, LinkUtility
 from crawler.storage.crawl_reader import iter_crawl_urls
 from crawler.storage.baseline_store import save_baseline
-from crawler.normalizer import normalize_url
-from crawler.url_utils import force_www_url
-from crawler.logger import logger
+from crawler.core import logger, MAX_WORKERS
+from crawler.js_engine import JSIntelligence, BrowserManager
 
 
 class BaselineWorker:
@@ -27,7 +26,6 @@ class BaselineWorker:
 
         # Use MAX_WORKERS from config, but ensure we don't exceed reasonable limits
         # relative to the DB pool size if running mainly in parallel.
-        from crawler.config import MAX_WORKERS
         self.max_workers = MAX_WORKERS
 
     # ------------------------------------------------------------
@@ -38,10 +36,10 @@ class BaselineWorker:
 
         try:
             # Normalize + force www (network fetch only)
-            fetch_url = normalize_url(url, preference_url=self.seed_url)
-            fetch_url = force_www_url(fetch_url)
+            fetch_url = LinkUtility.normalize_url(url, preference_url=self.seed_url)
+            fetch_url = LinkUtility.force_www_url(fetch_url)
 
-            result = fetch(fetch_url)
+            result = PageFetcher.fetch(fetch_url)
             if not result["success"]:
                 return "failed", f"Fetch failed for site={self.siteid} url={url}: {result.get('error')}", thread_name
 
@@ -55,16 +53,11 @@ class BaselineWorker:
             # ----------------------------------------------------
             # 🚀 SPA / React Detection & Escalation
             # ----------------------------------------------------
-            from crawler.js_detect import needs_js_rendering
-            if needs_js_rendering(html_content):
+            if JSIntelligence.needs_js_rendering(html_content):
                 try:
-                    # logger.info(f"{thread_name} : [JS-RENDER] Escalating {url} (SPA detected)")
-                    from crawler.js_renderer import render_js_sync
-                    rendered_html, final_url = render_js_sync(fetch_url)
-                    
+                    rendered_html, final_url = BrowserManager.render_sync(fetch_url)
                     if rendered_html and len(rendered_html) > len(html_content):
                         html_content = rendered_html
-                        # logger.info(f"{thread_name} : [JS-RENDER] Success for {url} ({len(html_content)} bytes)")
                 except Exception as e:
                     logger.warning(f"{thread_name} : [JS-RENDER] Failed for {url}: {e}")
             
