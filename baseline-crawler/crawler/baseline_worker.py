@@ -19,11 +19,12 @@ class BaselineWorker:
     - Safely parallelizes fetch + baseline update
     """
 
-    def __init__(self, *, custid, siteid, seed_url, target_urls=None):
+    def __init__(self, *, custid, siteid, seed_url, target_urls=None, heartbeat_callback=None):
         self.custid = custid
         self.siteid = siteid
         self.seed_url = seed_url
         self.target_urls = target_urls
+        self.heartbeat_callback = heartbeat_callback
 
         # Use MAX_WORKERS from config, but ensure we don't exceed reasonable limits
         # relative to the DB pool size if running mainly in parallel.
@@ -124,6 +125,7 @@ class BaselineWorker:
         failed = 0
         skipped = 0
         processed = 0
+        failed_list = []
 
         logger.info(
             f"[BASELINE] Parallel fetch with {self.max_workers} workers"
@@ -137,12 +139,16 @@ class BaselineWorker:
             thread_name_prefix="Worker"
         ) as executor:
 
-            futures = []
+            future_to_url = {}
 
             for url in url_iter:
-                futures.append(executor.submit(self._process_url, url))
+                f = executor.submit(self._process_url, url)
+                future_to_url[f] = url
+                # Invoke heartbeat while queuing (in case iterator is slow)
+                if self.heartbeat_callback:
+                    self.heartbeat_callback()
 
-            if not futures:
+            if not future_to_url:
                 logger.warning(
                     f"[BASELINE] No crawl_pages data found for site_id={self.siteid}. "
                     "Run CRAWL mode first."
@@ -152,9 +158,11 @@ class BaselineWorker:
                     "updated": 0,
                     "failed": 0,
                     "skipped": 0,
+                    "failed_urls": []
                 }
 
-            for future in as_completed(futures):
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
                 try:
                     action, details, thread_name = future.result()
                     processed += 1
@@ -183,6 +191,8 @@ class BaselineWorker:
                         skipped += 1
                     else:
                         failed += 1
+                        # details contains the error message
+                        failed_list.append({"url": url, "error": details})
                         logger.error(
                             f"{worker_display} : [BASELINE] Failed {details}"
                         )
@@ -194,8 +204,13 @@ class BaselineWorker:
                             f"created={created} updated={updated} failed={failed}"
                         )
 
+                    # Invoke heartbeat to keep watchdog happy
+                    if self.heartbeat_callback:
+                        self.heartbeat_callback()
+
                 except Exception as e:
                     failed += 1
+                    failed_list.append({"url": url, "error": str(e)})
                     logger.error(f"[BASELINE] Worker exception: {e}")
 
         # --------------------------------------------------------
@@ -214,4 +229,5 @@ class BaselineWorker:
             "updated": updated,
             "failed": failed,
             "skipped": skipped,
+            "failed_urls": failed_list
         }

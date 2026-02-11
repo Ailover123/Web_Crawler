@@ -21,23 +21,62 @@ IGNORED_ATTR_PATTERNS = {
     # Exact matches
     "nonce", "value", "floatingButtonsClickTracking", 
     "aria-controls", "aria-labelledby", "data-smartmenus-id", 
-    "id", "name", "cb", 
-    
-    # Common dynamic patterns
-    "data-csrf", "csrf-token", "authenticity_token", 
+    "id", "name", "cb",
+     
+    # security tokens 
+      "data-csrf", "csrf-token", "authenticity_token",
     "__VIEWSTATE", "__EVENTVALIDATION", "_token",
+    "ajax_nonce",
+    
+   #Versioning 
+   "data-version", "ver",
+   
+   #WP / VC / slider data attribute
+    "data-source",
+    "data-vc-full-width",
+    "data-vc-full-width-init",
+    "data-vc-stretch-content",
+
+    "data-zs-prev",
+    "data-zs-next",
+    "data-zs-overlay",
+    "data-zs-initzoom",
+    "data-zs-speed",
+    "data-zs-interval",
+    "data-zs-switchSpeed",
+    "data-zs-arrows",
+    "data-zs-bullets",
+    "data-zs-src",
+    "data-zs-src2",
+
 }
 
 SUFFIX_PATTERNS = {
-    "nonce",  # covers *nonce
+    "nonce",        # *nonce
+    "ver",          # ?ver=5.8.10
+    "version",      # data-version
+    "timestamp",    # cached@12345
+    "cache",        # cachebuster
 }
 
+
 IGNORED_TAGS = {
-    "base", # Frequently changes environment-to-environment or is injected
+    "base", "meta", "link",# Frequently changes environment-to-environment or is injected
 }
 
 PREFIX_PATTERNS = {
     "data-aos", "data-wow", "data-framer", "data-scroll", "aria-hidden"
+    #slider and carousel 
+     "slider-",
+    "carousel-",
+    "owl-",
+    "rev_slider_",
+    "like_sc_",
+ # WP / page builders
+    "vc_custom_",
+    "js-view-dom-id-",
+    "ltx-sr-id-",
+    "zoom-",
 }
 
 IGNORED_STYLE_PROPERTIES = {
@@ -66,42 +105,43 @@ def should_ignore_attr(attr_name: str) -> bool:
     return False
 
 
+VENDOR_PREFIXES = ("-webkit-", "-moz-", "-ms-", "-o-")
+
 def _normalize_style(style_str: str) -> str:
     """
-    Parse inline style, remove ignored properties, and return robust sorted string.
+    Parse inline style, remove ignored properties, and return stable sorted string.
     """
     if not style_str:
         return ""
-        
-    # Split by semicolon to get declarations
+
     declarations = [d.strip() for d in style_str.split(";") if d.strip()]
-    
     valid_decls = {}
-    
+
     for decl in declarations:
         if ":" not in decl:
             continue
-        key, val = decl.split(":", 1)
-        key = key.strip().lower()
-        val = val.strip()
-        
-        # Filter dynamic animation properties
-        is_ignored = False
-        for ignored_prop in IGNORED_STYLE_PROPERTIES:
-            # Check for exact match or vendor prefix match (e.g. -webkit-transform)
-            if key == ignored_prop or key.endswith("-" + ignored_prop):
-                is_ignored = True
+
+        raw_key, val = decl.split(":", 1)
+        key = raw_key.strip().lower()
+        val = " ".join(val.strip().split())
+
+        # Strip vendor prefix
+        for prefix in VENDOR_PREFIXES:
+            if key.startswith(prefix):
+                key = key[len(prefix):]
                 break
-        
-        if not is_ignored:
-            # Collapse whitespace in value
-            val = " ".join(val.split())
-            valid_decls[key] = val
-            
+
+        # Ignore dynamic / layout / animation properties
+        if key in IGNORED_STYLE_PROPERTIES:
+            continue
+
+        valid_decls[key] = val
+
     if not valid_decls:
         return ""
 
     return "; ".join(f"{k}: {v}" for k, v in sorted(valid_decls.items()))
+
 
 
 # ============================================================

@@ -66,6 +66,10 @@ WATCHDOG_TIMEOUT = 900  # 15 minutes hard timeout for inactivity
 GLOBAL_COMPARE_RESULTS = []
 COMPARE_LOCK = threading.Lock()
 
+# Global Baseline Failures (Session Summary)
+BASELINE_FAILED_URLS = []
+BASELINE_LOCK = threading.Lock()
+
 def watchdog_thread():
     """Kills the process if no activity is detected for WATCHDOG_TIMEOUT seconds."""
     while True:
@@ -174,11 +178,17 @@ def crawl_site(site, args, target_urls=None):
             logger.info(f"Worker-X : started (BASELINE) x{worker_count}")
             logger.info(f"Started {worker_count} workers.")
 
+            # Heartbeat helper
+            def update_heartbeat():
+                global LAST_ACTIVITY_TIME
+                LAST_ACTIVITY_TIME = time.time()
+
             stats = BaselineWorker(
                 custid=custid,
                 siteid=siteid,
                 seed_url=start_url,
                 target_urls=target_urls,
+                heartbeat_callback=update_heartbeat
             ).run()
 
             # 🛡️ Safety: Ensure stats is always a dictionary
@@ -194,6 +204,15 @@ def crawl_site(site, args, target_urls=None):
             # Update global counters
             with threading.Lock():
                 GLOBAL_TOTAL_URLS += baseline_count
+            
+            # Capture Failed URLs
+            failed_list = stats.get('failed_urls', [])
+            if failed_list:
+                with BASELINE_LOCK:
+                    for f in failed_list:
+                        # f is {"url": ..., "error": ...}
+                        f['siteid'] = siteid
+                        BASELINE_FAILED_URLS.append(f)
 
             job_logger.info("-" * 60)
             job_logger.info("BASELINE GENERATION COMPLETED")
@@ -669,6 +688,27 @@ def main():
                     url = str(r.get('url', ''))
                     
                     logger.info(f"{b_id:<25} | {status:<20} | {score:<8} | {sev:<10} | {url}")
+                
+                logger.info("=" * 100 + "\n")
+
+            # --- Baseline Failure Summary (BASELINE mode) ---
+            if CRAWL_MODE == "BASELINE" and BASELINE_FAILED_URLS:
+                logger.info("\n" + "=" * 100)
+                logger.info(f"{'BASELINE FAILED URLS SUMMARY':^100}")
+                logger.info("=" * 100)
+                
+                logger.info(f"{'SITE ID':<10} | {'URL':<50} | {'ERROR'}")
+                logger.info("-" * 100)
+                
+                for f in BASELINE_FAILED_URLS:
+                    sid = str(f.get('siteid', ''))
+                    # Truncate URL if too long
+                    u = f.get('url', '')
+                    if len(u) > 48:
+                        u = u[:45] + "..."
+                    err = f.get('error', '')
+                    
+                    logger.info(f"{sid:<10} | {u:<50} | {err}")
                 
                 logger.info("=" * 100 + "\n")
             

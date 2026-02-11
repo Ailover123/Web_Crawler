@@ -2,25 +2,33 @@
 from mysql.connector.pooling import MySQLConnectionPool
 from mysql.connector import Error
 import os
+import threading
 from dotenv import load_dotenv
 from crawler.storage.db_guard import DB_SEMAPHORE
 from crawler.normalizer import get_canonical_id
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 def with_retry(func):
     """Placeholder retry decorator (currently no-op)."""
     return func
 
+pool_size = int(os.getenv("MYSQL_POOL_SIZE", 5))
+db_host = os.getenv("MYSQL_HOST")
+db_user = os.getenv("MYSQL_USER")
+db_password = os.getenv("MYSQL_PASSWORD")
+db_name = os.getenv("MYSQL_DATABASE")
+db_port = os.getenv("MYSQL_PORT", 3306)
 
 pool = MySQLConnectionPool(
     pool_name="crawler_pool",
-    pool_size=int(os.getenv("MYSQL_POOL_SIZE", 5)),
-    host=os.getenv("MYSQL_HOST"),
-    user=os.getenv("MYSQL_USER"),
-    password=os.getenv("MYSQL_PASSWORD"),
-    database=os.getenv("MYSQL_DATABASE"),
+    pool_size=pool_size,
+    host=db_host,
+    port=db_port,
+    user=db_user,
+    password=db_password,
+    database=db_name,
 )
 
 
@@ -51,12 +59,105 @@ def get_connection(timeout: int = 10):
 
 
 
+def ensure_baseline_columns(conn):
+    """
+    Ensures defacement_sites has the necessary columns for baseline storage.
+    Migration helper.
+    """
+    try:
+        cur = conn.cursor()
+        
+        # Check if table exists first
+        cur.execute("SHOW TABLES LIKE 'defacement_sites'")
+        if not cur.fetchone():
+            return
+
+        # Add columns if missing
+        cols = [
+            ("content_hash", "VARCHAR(64) NULL"),
+            ("baseline_path", "TEXT NULL"),
+            ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
+        ]
+        
+        for col_name, col_def in cols:
+            # Check if column exists
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'defacement_sites'
+                  AND COLUMN_NAME = %s
+                """,
+                (col_name,)
+            )
+            if cur.fetchone()[0] == 0:
+                logger.info(f"[MIGRATION] Adding column {col_name} to defacement_sites...")
+                cur.execute(f"ALTER TABLE defacement_sites ADD COLUMN {col_name} {col_def}")
+        # -------------------------------------------------------------
+        # SCHEMA REPAIR: Fix crawl_jobs Foreign Key (sites_old -> sites)
+        # -------------------------------------------------------------
+        # 1. Check if sites.siteid is indexed
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.STATISTICS 
+            WHERE TABLE_SCHEMA = DATABASE() 
+              AND TABLE_NAME = 'sites' 
+              AND COLUMN_NAME = 'siteid'
+            """
+        )
+        if cur.fetchone()[0] == 0:
+            logger.info("[SCHEMA REPAIR] Creating index idx_siteid on sites table...")
+            cur.execute("CREATE INDEX idx_siteid ON sites(siteid)")
+
+        # 2. Check if crawl_jobs references sites_old
+        cur.execute(
+            """
+            SELECT CONSTRAINT_NAME 
+            FROM information_schema.KEY_COLUMN_USAGE 
+            WHERE TABLE_SCHEMA = DATABASE() 
+              AND TABLE_NAME = 'crawl_jobs' 
+              AND REFERENCED_TABLE_NAME = 'sites_old'
+            """
+        )
+        old_fk = cur.fetchone()
+        
+        if old_fk:
+            fk_name = old_fk[0]  # e.g., crawl_jobs_ibfk_1
+            logger.info(f"[SCHEMA REPAIR] Found obsolete FK {fk_name} (crawl_jobs -> sites_old). Dropping...")
+            cur.execute(f"ALTER TABLE crawl_jobs DROP FOREIGN KEY {fk_name}")
+            
+            # 3. Add new Foreign Key (crawl_jobs -> sites)
+            logger.info("[SCHEMA REPAIR] Adding new FK (crawl_jobs -> sites)...")
+            # Ensure no orphan jobs exist before adding constraint
+            cur.execute("DELETE FROM crawl_jobs WHERE siteid NOT IN (SELECT siteid FROM sites)")
+            cur.execute(
+                """
+                ALTER TABLE crawl_jobs 
+                ADD CONSTRAINT crawl_jobs_fk_sites 
+                FOREIGN KEY (siteid) REFERENCES sites(siteid) 
+                ON DELETE CASCADE
+                """
+            )
+        
+        conn.commit()
+    except Exception as e:
+        logger.error(f"[MIGRATION] Failed to ensure schema: {e}")
+        # Don't raise, allow startup to proceed/fail naturally later
+
+
 def check_db_health():
     conn = get_connection()
     try:
         cur = conn.cursor()
         cur.execute("SELECT 1")
-        return cur.fetchone()[0] == 1
+        res = cur.fetchone()
+        is_healthy = res[0] == 1
+        
+        # Run schema check on health check
+        ensure_baseline_columns(conn)
+        
+        return is_healthy
     finally:
         cur.close()
         conn.close()
@@ -67,7 +168,7 @@ def fetch_enabled_sites():
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT siteid, custid, url FROM sites WHERE enabled=1")
+        cur.execute("SELECT siteid, custid, url FROM sites")
         return cur.fetchall()
     finally:
         cur.close()
@@ -82,16 +183,41 @@ def insert_crawl_job(job_id, custid, siteid, start_url=None):
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO crawl_jobs (
-                job_id,
-                custid,
-                siteid,
-                start_url,
-                status
-            ) VALUES (%s, %s, %s, %s, 'running')
-            """,
-            (job_id, custid, siteid, start_url),
+            SELECT 1
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'crawl_jobs'
+              AND COLUMN_NAME = 'start_url'
+            LIMIT 1
+            """
         )
+        has_start_url = cursor.fetchone() is not None
+
+        if has_start_url:
+            cursor.execute(
+                """
+                INSERT INTO crawl_jobs (
+                    job_id,
+                    custid,
+                    siteid,
+                    start_url,
+                    status
+                ) VALUES (%s, %s, %s, %s, 'running')
+                """,
+                (job_id, custid, siteid, start_url),
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO crawl_jobs (
+                    job_id,
+                    custid,
+                    siteid,
+                    status
+                ) VALUES (%s, %s, %s, 'running')
+                """,
+                (job_id, custid, siteid),
+            )
         conn.commit()
     except Error:
         conn.rollback()
@@ -225,7 +351,7 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
 
     conn = get_connection()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(buffered=True)
         
         # 1. Manual Existence Check (Code-level duplicate prevention)
         cur.execute(
@@ -233,6 +359,10 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
             (siteid, canonical_url)
         )
         row = cur.fetchone()
+        try:
+             cur.fetchall()
+        except:
+             pass
         
         if row:
             # 2. UPDATE existing record
@@ -265,6 +395,49 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
 # BASELINE HASH HELPERS (IMMUTABLE)
 # ============================================================
 
+# Cache schema checks to avoid repeated queries
+_SCHEMA_CACHE = {}
+_SCHEMA_LOCK = threading.Lock()
+
+def _has_column(table_name, column_name):
+    """Check if a column exists in a table (cached per process)."""
+    cache_key = f"{table_name}.{column_name}"
+    
+    with _SCHEMA_LOCK:
+        if cache_key in _SCHEMA_CACHE:
+            return _SCHEMA_CACHE[cache_key]
+    
+    # Not cached yet - check database
+    conn = get_connection()
+    try:
+        cur = conn.cursor(buffered=True)
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = %s
+              AND COLUMN_NAME = %s
+            """,
+            (table_name, column_name)
+        )
+        result = cur.fetchone()
+        try:
+             cur.fetchall()
+        except:
+             pass
+        
+        has_it = result is not None and result[0] > 0
+        
+        with _SCHEMA_LOCK:
+            _SCHEMA_CACHE[cache_key] = has_it
+        
+        return has_it
+    finally:
+        cur.close()
+        conn.close()
+        DB_SEMAPHORE.release()
+
 def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, base_url=None):
     """
     Insert or UPDATE baseline for a URL.
@@ -274,39 +447,68 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
     if not canonical_url:
         return False
 
+    # Check once per process whether updated_at column exists
+    has_updated_at = _has_column('defacement_sites', 'updated_at')
+
     conn = get_connection()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(buffered=True)
         
         # 1. 🔍 Check via SELECT to avoid duplicates if constraints are missing
         cur.execute(
-            "SELECT id FROM baseline_pages WHERE site_id=%s AND normalized_url=%s",
+            "SELECT id FROM defacement_sites WHERE siteid=%s AND url=%s",
             (site_id, canonical_url)
         )
         row = cur.fetchone()
+        try:
+            # Consume any remaining results (though fetchone implies one)
+            cur.fetchall()
+        except Exception:
+            pass
         
         if row:
             # 2. 🔄 UPDATE
-            cur.execute(
-                """
-                UPDATE baseline_pages
-                SET content_hash = %s,
-                    baseline_path = %s,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-                """,
-                (content_hash, baseline_path, row[0]),
-            )
+            if has_updated_at:
+                cur.execute(
+                    """
+                    UPDATE defacement_sites
+                    SET content_hash = %s,
+                        baseline_path = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (content_hash, baseline_path, row[0]),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE defacement_sites
+                    SET content_hash = %s,
+                        baseline_path = %s
+                    WHERE id = %s
+                    """,
+                    (content_hash, baseline_path, row[0]),
+                )
         else:
             # 3. 🆕 INSERT
-            cur.execute(
-                """
-                INSERT INTO baseline_pages
-                    (site_id, normalized_url, content_hash, baseline_path, updated_at)
-                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-                """,
-                (site_id, canonical_url, content_hash, baseline_path),
-            )
+            if has_updated_at:
+                cur.execute(
+                    """
+                    INSERT INTO defacement_sites
+                        (siteid, url, content_hash, baseline_path, updated_at)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    """,
+                    (site_id, canonical_url, content_hash, baseline_path),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO defacement_sites
+                        (siteid, url, content_hash, baseline_path)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (site_id, canonical_url, content_hash, baseline_path),
+                )
             
         conn.commit()
         return True
@@ -320,18 +522,23 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
 def fetch_baseline_hash(site_id, normalized_url, base_url=None):
     conn = get_connection()
     try:
-        cur = conn.cursor(dictionary=True)
+        cur = conn.cursor(dictionary=True, buffered=True)
         # Use canonical "Domain/Path" for lookup
         canonical_url = get_canonical_id(normalized_url, base_url)
         cur.execute(
             """
             SELECT content_hash, baseline_path
-            FROM baseline_pages
-            WHERE site_id=%s AND normalized_url=%s
+            FROM defacement_sites
+            WHERE siteid=%s AND url=%s
             """,
             (site_id, canonical_url),
         )
-        return cur.fetchone()
+        row = cur.fetchone()
+        try:
+             cur.fetchall()
+        except:
+             pass
+        return row
     finally:
         cur.close()
         conn.close()
@@ -341,12 +548,17 @@ def fetch_baseline_hash(site_id, normalized_url, base_url=None):
 def site_has_baselines(site_id):
     conn = get_connection()
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(buffered=True)
         cur.execute(
-            "SELECT 1 FROM baseline_pages WHERE site_id=%s LIMIT 1",
+            "SELECT 1 FROM defacement_sites WHERE siteid=%s AND content_hash IS NOT NULL LIMIT 1",
             (site_id,),
         )
-        return cur.fetchone() is not None
+        row = cur.fetchone()
+        try:
+             cur.fetchall()
+        except:
+             pass
+        return row is not None
     finally:
         cur.close()
         conn.close()

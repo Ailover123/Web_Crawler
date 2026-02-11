@@ -19,7 +19,7 @@ def iter_crawl_urls(*, siteid: int):
             FROM crawl_pages
             WHERE siteid = %s
               AND content_type LIKE 'text/html%%'
-            ORDER BY id ASC
+                        ORDER BY url ASC
             """,
             (siteid,),
         )

@@ -45,19 +45,36 @@ def generate_report():
         cur.execute("SELECT COUNT(*) as count FROM crawl_pages")
         total_pages_crawled = cur.fetchone()['count']
 
-        cur.execute("SELECT COUNT(*) as count FROM baseline_pages")
+        cur.execute("SELECT COUNT(*) as count FROM defacement_sites WHERE content_hash IS NOT NULL")
         total_baselines = cur.fetchone()['count']
 
         cur.execute("SELECT COUNT(*) as count FROM observed_pages WHERE changed=1")
         total_alerts = cur.fetchone()['count']
 
+        cur.execute(
+            """
+            SELECT COLUMN_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'observed_pages'
+              AND COLUMN_NAME IN ('checked_at', 'created_at')
+            """
+        )
+        cols = {row["COLUMN_NAME"] for row in cur.fetchall()}
+        if "checked_at" in cols:
+            alerts_order_by = "o.checked_at"
+        elif "created_at" in cols:
+            alerts_order_by = "o.created_at"
+        else:
+            alerts_order_by = "o.id"
+
         # 2. Fetch Recent Alerts
-        cur.execute("""
+        cur.execute(f"""
             SELECT o.*, s.url as site_domain 
             FROM observed_pages o
             JOIN sites s ON o.site_id = s.siteid
             WHERE o.changed = 1
-            ORDER BY o.checked_at DESC
+            ORDER BY {alerts_order_by} DESC
             LIMIT 200
         """)
         alerts = cur.fetchall()
