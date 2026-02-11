@@ -16,13 +16,15 @@ import uuid
 import os
 import requests
 import urllib3
+import sys
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-from crawler.frontier import Frontier
-from crawler.worker import Worker
-from crawler.normalizer import normalize_url
+from report_generator import generate_report
+
+from crawler.engine import Frontier, CrawlerWorker, ExecutionPolicy
+from crawler.processor import LinkUtility, TrafficControl
 from crawler.storage.db import (
     check_db_health,
     fetch_enabled_sites,
@@ -33,18 +35,12 @@ from crawler.storage.db import (
 )
 from crawler.storage.mysql import fetch_site_info_by_baseline_id, site_has_baselines
 from crawler.baseline_worker import BaselineWorker
-from crawler.worker import SKIP_REPORT
-from crawler.logger import logger
-from crawler.config import (
+from crawler.core import (
+    logger,
     MIN_WORKERS,
     MAX_WORKERS,
     MAX_PARALLEL_SITES,
-)
-from crawler.worker import SKIP_LOCK
-from crawler.throttle import (
-    should_scale_down, 
-    reset_scale_down, 
-    set_pause
+    CompanyFormatter,
 )
 
 CRAWL_MODE = os.getenv("CRAWL_MODE", "CRAWL").upper()
@@ -59,6 +55,11 @@ GLOBAL_START_TIME = time.time()
 LAST_ACTIVITY_TIME = time.time()
 GLOBAL_LOCK = threading.Lock()
 SUMMARY_LOCK = threading.Lock() # 🔒 Atomic logging for summary tables
+# Global skip report aggregation
+from collections import defaultdict
+SKIP_REPORT = defaultdict(lambda: {"count": 0, "urls": []})
+SKIP_LOCK = threading.Lock()
+site_skip_lock = threading.Lock()
 GLOBAL_SESSIONS = [] # Tracks (siteid, url, visited, duration, alerts_count)
 WATCHDOG_TIMEOUT = 900  # 15 minutes hard timeout for inactivity
 
@@ -99,7 +100,7 @@ def resolve_seed_url(raw_url: str) -> str:
                 u if u.startswith(("http://", "https://")) else "https://" + u,
                 timeout=12,
                 allow_redirects=True,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"},
+                headers={"User-Agent": USER_AGENT},
                 verify=False,
             )
             if r.status_code < 400:
@@ -129,19 +130,15 @@ def crawl_site(site, args, target_urls=None):
     original_site_url = site["url"].strip()
 
     # 🔑 Resolve seed FIRST, normalize AFTER
-    from crawler.url_utils import canonicalize_seed, force_www_url
-
     resolved_seed = resolve_seed_url(original_site_url)
     
     # Respect the resolved seed exactly (don't force www)
-    start_url = canonicalize_seed(resolved_seed)
+    start_url = LinkUtility.canonicalize_seed(resolved_seed)
 
     job_id = str(uuid.uuid4())
     
     # Site-local metrics for thread-safety in parallel mode
-    from collections import defaultdict
     site_skip_report = defaultdict(lambda: {"count": 0, "urls": []})
-    site_skip_lock = threading.Lock()
 
     job_logger = logger
 
@@ -235,8 +232,7 @@ def crawl_site(site, args, target_urls=None):
         initial_has_data = has_site_crawl_data(siteid)
 
         # 🛡️ Seed Skip Check
-        from crawler.worker import classify_skip
-        skip_reason = classify_skip(start_url)
+        skip_reason = ExecutionPolicy.classify_skip(start_url)
         if skip_reason:
              job_logger.warning(f"Seed URL {start_url} skipped by rule: {skip_reason}")
              return
@@ -256,7 +252,7 @@ def crawl_site(site, args, target_urls=None):
         workers = []
         try:
             for i in range(MIN_WORKERS):
-                w = Worker(
+                w = CrawlerWorker(
                     frontier=frontier,
                     name=f"Worker-{siteid}-{i}",
                     custid=custid,
@@ -287,21 +283,19 @@ def crawl_site(site, args, target_urls=None):
                     break
                 
                 # --- ADAPTIVE SCALE DOWN ON 429 ---
-                if should_scale_down(siteid) and len(workers) > MIN_WORKERS:
+                if TrafficControl.should_scale_down(siteid) and len(workers) > MIN_WORKERS:
                     num_to_stop = len(workers) - MIN_WORKERS
-                    job_logger.warning(f"429 hit! Scaling down {num_to_stop} workers to reach MIN_WORKERS ({MIN_WORKERS})")
+                    job_logger.warning(f"[Site {siteid} - {original_site_url}] 429 hit! Scaling down {num_to_stop} workers to reach MIN_WORKERS ({MIN_WORKERS})")
                     for _ in range(num_to_stop):
                         if len(workers) > MIN_WORKERS:
                             w = workers.pop()
                             w.stop()
-                            # join omitted to avoid blocking the main loop too long, 
-                            # the finally block handles it anyway
-                    reset_scale_down(siteid)
+                    TrafficControl.reset_scale_down(siteid)
                 
                 if qsize > 100 and len(workers) < MAX_WORKERS:
                     scale_count = min(5, MAX_WORKERS - len(workers))
                     for i in range(scale_count):
-                        w = Worker(
+                        w = CrawlerWorker(
                             frontier=frontier,
                             name=f"Worker-{siteid}-{len(workers)}",
                             custid=custid,
@@ -318,7 +312,7 @@ def crawl_site(site, args, target_urls=None):
                         )
                         w.start()
                         workers.append(w)
-                    job_logger.info(f"Dynamically scaled up to {len(workers)} workers (Queue: {qsize})")
+                    job_logger.info(f"[Site {siteid} - {original_site_url}] Dynamically scaled up to {len(workers)} workers (Queue: {qsize})")
 
                 if unfinished == 0:
                     break
@@ -349,10 +343,12 @@ def crawl_site(site, args, target_urls=None):
                              break # Don't block forever if it's truly stuck
             
             # Reset the Global Site Pause so fresh runs aren't blocked
-            set_pause(siteid, 0)
-            reset_scale_down(siteid)
+            TrafficControl.set_pause(siteid, 0)
+            TrafficControl.reset_scale_down(siteid)
             
             job_logger.info(f"All workers for site {siteid} stopped.")
+            # Match legacy: No 'COMPLETED' extra log here
+            pass
 
         duration = time.time() - start_time
         stats = frontier.get_stats()
@@ -534,8 +530,6 @@ def main():
         log_path = os.path.join(log_dir, log_filename)
         
         # Manually attach FileHandler since setup_logger returns early if handlers exist
-        import logging
-        from crawler.logger import CompanyFormatter
         
         file_handler = logging.FileHandler(log_path)
         file_handler.setFormatter(CompanyFormatter())
@@ -683,7 +677,6 @@ def main():
 
     # AUTOMATED REPORT GENERATION
     try:
-        from report_generator import generate_report
         generate_report()
     except Exception as e:
         logger.error(f"Failed to generate automated report: {e}")
@@ -694,7 +687,6 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-    import sys
     main()
 
     if SKIP_REPORT:
@@ -702,16 +694,6 @@ if __name__ == "__main__":
         print("GLOBAL SKIPPED URL REPORT")
         print("=" * 60)
         for skip_type, data in SKIP_REPORT.items():
-            try:
-                count = len(data.get("urls", []))
-                urls = data.get("urls", [])
-            except Exception:
-                count = 0
-                urls = []
-
-            print(f"[{skip_type}] {count} URLs skipped")
-            for u in urls[:10]: # Limit print for brevity
-                print(f"  - {u}")
-        print("=" * 60)
+             print(f"{skip_type:<20} | {data['count']}")
     
     sys.exit(0)
