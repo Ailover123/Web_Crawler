@@ -1,0 +1,331 @@
+"""
+FILE DESCRIPTION: Global content processing pipeline handling network fetching, link extraction, and URL sanitization.
+CONSOLIDATED FROM: fetcher.py, parser.py, normalizer.py, url_utils.py, throttle.py
+KEY FUNCTIONS/CLASSES: LinkUtility, TrafficControl, PageFetcher, LinkExtractor
+"""
+
+import requests
+import time
+import urllib3
+import tldextract
+import threading
+import re
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, urlunparse, urljoin, quote, unquote
+from crawler.core import USER_AGENT, REQUEST_TIMEOUT, logger
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# === LINK UTILITY ===
+
+class LinkUtility:
+    """
+    FLOW: Handles URL string manipulation -> Normalizes schemes and domains -> 
+    Provides canonical identifiers for DB indexing -> Logic merged from normalizer.py and url_utils.py.
+    """
+    @staticmethod
+    def normalize_url(url: str, *, base: str | None = None, preference_url: str | None = None) -> str:
+        if not url: return ""
+        url = url.strip()
+        if "://" not in url and not url.startswith("/"): url = "http://" + url
+        if base: url = urljoin(base, url)
+        parsed = urlparse(url)
+        scheme = parsed.scheme or "https"
+        netloc = parsed.netloc.lower()
+        path = parsed.path if parsed.path else "/"
+        # Robust encoding: unquote first to avoid double encoding, then quote
+        path = quote(unquote(path))
+        while '//' in path: path = path.replace('//', '/')
+        path = path.rstrip("/")
+        if not path: path = "/"
+        query = parsed.query
+        return urlunparse((scheme, netloc, path, "", query, ""))
+
+    @staticmethod
+    def get_canonical_id(url: str, base_url: str | None = None) -> str:
+        if not url: return ""
+        url = LinkUtility.normalize_url(url, preference_url=base_url)
+        parsed = urlparse(url)
+        netloc = parsed.netloc.lower()
+        if base_url:
+            base_parsed = urlparse(base_url if "://" in base_url else "https://" + base_url)
+            base_netloc = base_parsed.netloc.lower()
+            pref_has_www = base_netloc.startswith("www.")
+            clean_netloc = netloc[4:] if netloc.startswith("www.") else netloc
+            clean_base = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc
+            if clean_netloc == clean_base:
+                if pref_has_www and not netloc.startswith("www."): netloc = "www." + netloc
+                elif not pref_has_www and netloc.startswith("www."): netloc = netloc[4:]
+        path = parsed.path
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{netloc}{path}{query}" if path and path != "/" else f"{netloc}{query}"
+
+    @staticmethod
+    def canonicalize_seed(url: str) -> str:
+        p = urlparse(url)
+        path = p.path.rstrip("/")
+        return urlunparse((p.scheme, p.netloc, path, "", "", ""))
+
+    @staticmethod
+    def force_www_url(url: str) -> str:
+        if not url: return ""
+        ext = tldextract.extract(url)
+        if not ext.subdomain and ext.domain and ext.suffix:
+            p = urlparse(url)
+            netloc = p.netloc.lower()
+            port = f":{netloc.split(':', 1)[1]}" if ":" in netloc else ""
+            return urlunparse((p.scheme, f"www.{ext.domain}.{ext.suffix}{port}", p.path, p.params, p.query, p.fragment))
+        return url
+
+
+# === TRAFFIC CONTROL ===
+
+class TrafficControl:
+    """
+    FLOW: Manages domain-wide pauses and worker scaling -> Tracks 429 rate limit events -> 
+    Implements thread-safe wait periods before network requests.
+    """
+    SITE_PAUSES = {}
+    SITE_SCALE_DOWN_REQUESTS = {}
+    PAUSE_LOCK = threading.Lock()
+
+    @classmethod
+    def set_pause(cls, siteid, seconds=5, url=None):
+        if not siteid: return
+        with cls.PAUSE_LOCK:
+            now = time.time()
+            if seconds > 0:
+                until = now + seconds
+                # Only log if we aren't already paused or if this extends it significantly
+                if cls.SITE_PAUSES.get(siteid, 0) < now:
+                    cls.SITE_SCALE_DOWN_REQUESTS[siteid] = True
+                    url_info = f" on {url}" if url else ""
+                    logger.warning(f"[THROTTLE] Site {siteid} hit 429{url_info}. Setting DOMAIN-WIDE PAUSE for {seconds}s and requesting SCALE DOWN.")
+                cls.SITE_PAUSES[siteid] = max(cls.SITE_PAUSES.get(siteid, 0), until)
+            else:
+                if cls.SITE_PAUSES.get(siteid, 0) > now:
+                    logger.info(f"[THROTTLE] Site {siteid} pause cleared.")
+                cls.SITE_PAUSES[siteid] = 0
+
+    @classmethod
+    def should_scale_down(cls, siteid):
+        with cls.PAUSE_LOCK: return cls.SITE_SCALE_DOWN_REQUESTS.get(siteid, False)
+
+    @classmethod
+    def reset_scale_down(cls, siteid):
+        with cls.PAUSE_LOCK: cls.SITE_SCALE_DOWN_REQUESTS[siteid] = False
+
+    @classmethod
+    def get_remaining_pause(cls, siteid):
+        if not siteid: return 0
+        with cls.PAUSE_LOCK:
+            remaining = cls.SITE_PAUSES.get(siteid, 0) - time.time()
+            return max(0, remaining)
+
+
+# === PAGE FETCHER ===
+
+class PageFetcher:
+    """
+    FLOW: Checks for active domain pauses -> Executes HTTP request with browser-like headers -> 
+    Handles 429 retries with exponential backoff -> Returns structured response or error details.
+    """
+    @staticmethod
+    def fetch(url, siteid=None, referer=None):
+        if siteid:
+            remaining = TrafficControl.get_remaining_pause(siteid)
+            if remaining > 0:
+                # Use debug for pre-fetch wait to reduce log noise
+                logger.debug(f"[THROTTLE] Pre-fetch pause active for site {siteid}. Waiting {remaining:.1f}s...")
+                time.sleep(remaining)
+
+        max_retries = 3
+        retry_delay = 5
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+        }
+        if referer:
+            headers["Referer"] = referer
+
+        for attempt in range(max_retries + 1):
+            if siteid and attempt > 0:
+                remaining = TrafficControl.get_remaining_pause(siteid)
+                if remaining > 0:
+                    time.sleep(remaining)
+
+            start_time = time.time()
+            try:
+                r = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers, verify=False, allow_redirects=True)
+                fetch_time_ms = int((time.time() - start_time) * 1000)
+                content_type = r.headers.get("Content-Type", "").lower()
+
+                if r.status_code == 429:
+                    TrafficControl.set_pause(siteid, 5, url=url)
+                    if attempt < max_retries:
+                        logger.warning(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Waiting locally for {retry_delay}s...")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                    else:
+                        logger.error(f"429 Rate Limit persisted for {url} after {max_retries} retries. Final 5s pause.")
+                        time.sleep(5)
+
+                if 200 <= r.status_code < 300:
+                    success = "text/html" in content_type or "application/json" in content_type
+                    return {
+                        "success": success,
+                        "response": r,
+                        "final_url": r.url,
+                        "fetch_time_ms": fetch_time_ms,
+                        "response_size": len(r.content),
+                        "content_type": content_type,
+                        "error": None if success else f"ignored content type: {content_type}"
+                    }
+                else:
+                    return {
+                        "success": False, "error": f"http error: {r.status_code}",
+                        "response": r, "final_url": r.url,
+                        "content_type": content_type, "fetch_time_ms": fetch_time_ms,
+                        "html": r.text if "text/html" in content_type else "",
+                    }
+            except Exception as e:
+                if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)) and attempt < max_retries:
+                    err_type = "Timeout" if isinstance(e, requests.exceptions.Timeout) else "Connection Error"
+                    logger.warning(f"[RETRY {attempt+1}/{max_retries}] {err_type} for {url}: {e}. Waiting {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                return {"success": False, "error": str(e), "content_type": "", "fetch_time_ms": int((time.time() - start_time) * 1000)}
+
+
+# === LINK EXTRACTOR ===
+
+class LinkExtractor:
+    """
+    FLOW: Parses HTML using BeautifulSoup -> Identifies all anchors and asset links -> 
+    Applies domain-boundary filters -> Classifies URLs into categories (Pagination, Static, etc.) -> 
+    Returns separate lists for discovery and auditing.
+    """
+    @staticmethod
+    def classify_url(url):
+        types = set()
+        url_lower = url.lower()
+        path = urlparse(url).path.lower()
+        if any(pat in url_lower for pat in ['/page/', '/p/', '?page=', '?p=', '/pagination/']): types.add('pagination')
+        if any(pat in url_lower for pat in ['/uploads/', '/assets/', '/wp-content/uploads/', '/media/', '/files/']): types.add('assets_uploads')
+        if any(path.endswith(ext) for ext in ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg']): types.add('assets_uploads')
+        if path.endswith('.css') or path.endswith('.js'): types.add('scripts_styles')
+        if 'wp-json' in url_lower or '/api/' in url_lower: types.add('api_like')
+        if not types: types.add('normal_html')
+        return types
+
+    @staticmethod
+    def extract_urls(html, base_url):
+        soup = BeautifulSoup(html, 'html.parser')
+        base_domain = urlparse(base_url).netloc
+        urls, assets = [], []
+
+        def strip_fragment(u):
+            p = urlparse(u)
+            return urlunparse((p.scheme, p.netloc, p.path, p.params, p.query, ""))
+
+        for a in soup.find_all('a', href=True):
+            href = a['href'].strip()
+            if not href or href.startswith('#') or href.startswith('mailto:') or href.startswith('tel:'): continue
+            
+            # Heuristic for domain-prefixed links (e.g., allianceproit.com/services)
+            # if it looks like it starts with a domain but missing scheme, force it absolute
+            if not href.startswith('/') and '://' not in href and not href.startswith('#'):
+                first_part = href.split('/')[0].lower()
+                # Looser check: if it looks like a domain name (has a dot and common tld or matches current netloc)
+                if '.' in first_part and not first_part.startswith('.'):
+                    current_netloc = urlparse(base_url).netloc.lower().replace('www.', '')
+                    clean_cand = first_part.replace('www.', '')
+                    # If it matches current site or looks like a typical domain we are interested in
+                    if clean_cand == current_netloc or clean_cand.split('.')[0] in current_netloc:
+                        href = f"{urlparse(base_url).scheme or 'https'}://{href}"
+
+            url = strip_fragment(urljoin(base_url, href))
+            if "®" in url: url = url.replace("®", "&reg")
+            if LinkExtractor._is_allowed_url(url, base_domain): urls.append(url)
+
+        for img in soup.find_all('img', src=True):
+            asset_url = strip_fragment(urljoin(base_url, img['src']))
+            if LinkExtractor._is_allowed_url(asset_url, base_domain): assets.append(asset_url)
+
+        return urls, assets
+
+    @staticmethod
+    def _is_allowed_url(url, base_domain):
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"): return False
+        cand_ext = tldextract.extract(url)
+        base_ext = tldextract.extract(f"http://{base_domain}")
+        return cand_ext.registered_domain == base_ext.registered_domain
+
+
+# === HTML NORMALIZER (FOR HASHING) ===
+
+class ContentNormalizer:
+    """
+    FLOW: Strips dynamic noise (IDs, nonces, timestamps) using regex -> 
+    Standardizes whitespace and tag casing -> Returns deterministic HTML for stable fingerprinting.
+    """
+    SKIP_PATTERNS = [
+        re.compile(r'(?i)"[^"]*nonce[^"]*"\s*:\s*["\'](?:[^"\\]|\\.)*["\']'),
+        re.compile(r'(?i)\b[\w:-]*nonce[\w:-]*\s*=\s*["\'](?:[^"\\]|\\.)*["\']'),
+        re.compile(r'(?i)\bvalue\s*=\s*["\'](?:[^"\\]|\\.)*["\']'),
+        re.compile(r'(?i)\bid\s*=\s*["\'][^"\']*["\']'),
+    ]
+
+    @classmethod
+    def normalize_html(cls, html: str) -> str:
+        if not html: return ""
+        for pattern in cls.SKIP_PATTERNS:
+            html = pattern.sub('', html)
+        soup = BeautifulSoup(html, "lxml")
+        for tag in soup(["noscript"]): tag.decompose()
+        normalized = soup.prettify()
+        return "\n".join(line.strip() for line in normalized.splitlines() if line.strip())
+
+    @staticmethod
+    def _html_to_semantic_lines(html: str) -> list[str]:
+        """Convert HTML into whitespace-stable, semantic lines."""
+        soup = BeautifulSoup(html or "", "lxml")
+        lines: list[str] = []
+
+        def walk(node, depth: int = 0) -> None:
+            indent = "  " * depth
+            from bs4 import NavigableString, Tag
+            if isinstance(node, NavigableString):
+                text = " ".join(str(node).split())
+                if text: lines.append(indent + text)
+                return
+            if isinstance(node, Tag):
+                attrs = " ".join(
+                    f'{key}="{ " ".join(value) if isinstance(value, list) else value }"'
+                    for key, value in sorted(node.attrs.items())
+                )
+                lines.append(indent + f"<{node.name}{(' ' + attrs) if attrs else ''}>")
+                for child in node.children: walk(child, depth + 1)
+                lines.append(indent + f"</{node.name}>")
+
+        for child in soup.contents: walk(child)
+        return lines
+
+    @staticmethod
+    def semantic_hash(html: str) -> str:
+        """Return a SHA256 fingerprint of the semantic HTML content."""
+        lines = ContentNormalizer._html_to_semantic_lines(html)
+        payload = "\n".join(lines)
+        import hashlib
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
