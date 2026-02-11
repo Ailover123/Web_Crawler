@@ -32,9 +32,9 @@ def get_baseline_hash(
                     id,
                     content_hash,
                     baseline_path
-                FROM baseline_pages
-                WHERE site_id = %s
-                  AND normalized_url = %s
+                FROM defacement_sites
+                WHERE siteid = %s
+                  AND url = %s
                 LIMIT 1
                 """,
                 (site_id, normalized_url),
@@ -55,9 +55,9 @@ def get_baseline_hash(
                     id,
                     content_hash,
                     baseline_path
-                FROM baseline_pages
-                WHERE site_id = %s
-                  AND normalized_url = %s
+                FROM defacement_sites
+                WHERE siteid = %s
+                  AND url = %s
                 LIMIT 1
                 """,
                 (site_id, alt),
