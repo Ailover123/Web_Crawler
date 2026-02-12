@@ -192,11 +192,6 @@ def migrate_sql(input_file, output_file):
     statements = split_sql_statements(content)
     
     for stmt in statements:
-        # --- EXCLUSION LOGIC ---
-        # 1. Skip cleanup commands
-        if re.search(r"(DROP TABLE|TRUNCATE TABLE)\s+IF EXISTS\s+`?defacement_sites`?", stmt, flags=re.IGNORECASE):
-            continue
-            
         # --- TRANSFORMATION LOGIC ---
 
         # 1. Rename only the table name (using word boundaries \b)
