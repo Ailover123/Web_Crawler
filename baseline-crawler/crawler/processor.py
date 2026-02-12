@@ -98,7 +98,7 @@ class TrafficControl:
                 if cls.SITE_PAUSES.get(siteid, 0) < now:
                     cls.SITE_SCALE_DOWN_REQUESTS[siteid] = True
                     url_info = f" on {url}" if url else ""
-                    logger.info(f"[THROTTLE] Site {siteid} hit 429{url_info}. Setting DOMAIN-WIDE PAUSE for {seconds}s and requesting SCALE DOWN.")
+                    logger.info(f"[THROTTLE] Site {siteid} hit 429/503{url_info}. Setting DOMAIN-WIDE PAUSE for {seconds}s and requesting SCALE DOWN.")
                 cls.SITE_PAUSES[siteid] = max(cls.SITE_PAUSES.get(siteid, 0), until)
             else:
                 if cls.SITE_PAUSES.get(siteid, 0) > now:
@@ -165,16 +165,16 @@ class PageFetcher:
                 fetch_time_ms = int((time.time() - start_time) * 1000)
                 content_type = r.headers.get("Content-Type", "").lower()
 
-                if r.status_code == 429:
+                if r.status_code == 429 or r.status_code == 503:
                     TrafficControl.set_pause(siteid, 5, url=url)
                     if attempt < max_retries:
-                        logger.warning(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Waiting locally for {retry_delay}s...")
+                        logger.warning(f"[RETRY {attempt+1}/{max_retries}] {r.status_code} Error for {url}. Waiting locally for {retry_delay}s...")
                         time.sleep(retry_delay)
                         retry_delay *= 2
                         logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
                         continue
                     else:
-                        logger.error(f"429 Rate Limit persisted for {url} after {max_retries} retries. Final 5s pause.")
+                        logger.error(f"{r.status_code} Error persisted for {url} after {max_retries} retries. Final 5s pause.")
                         time.sleep(5)
 
                 if 200 <= r.status_code < 300:

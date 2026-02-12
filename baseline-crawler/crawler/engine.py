@@ -212,7 +212,7 @@ class CrawlerWorker(threading.Thread):
         self.new_urls = []
         self.js_render_stats = {"total": 0, "success": 0, "failed": 0}
         self.failure_reasons = defaultdict(int)
-        self.failed_429_count = 0
+        self.failed_throttle_count = 0 # Tracks 429 and 503 errors
 
     def is_soft_redirect(self, html: str) -> bool:
         if not html: return False
@@ -277,8 +277,8 @@ class CrawlerWorker(threading.Thread):
                 fetch_url = LinkUtility.force_www_url(url)
                 result = PageFetcher.fetch(fetch_url, siteid=self.siteid, referer=discovered_from)
                 
-                if result.get("error") and "429" in str(result["error"]):
-                    self.failed_429_count += 1
+                if result.get("error") and any(err in str(result["error"]) for err in ("429", "503")):
+                    self.failed_throttle_count += 1
                 
                 if not result["success"]:
                     # Handle soft redirects on 404/ignored

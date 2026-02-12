@@ -26,11 +26,6 @@ class FlushingFileHandler(logging.FileHandler):
     def emit(self, record):
         super().emit(record)
         self.flush()
-        if self.stream:
-            try:
-                os.fsync(self.stream.fileno())
-            except Exception:
-                pass
 
 from report_generator import generate_report
 
@@ -59,7 +54,7 @@ assert CRAWL_MODE in ("BASELINE", "CRAWL", "COMPARE")
 
 # Global crawl counters (Session Summary)
 GLOBAL_SUCCESS = 0
-GLOBAL_429_ERRORS = 0
+GLOBAL_THROTTLE_ERRORS = 0 # 429 and 503 errors
 GLOBAL_OTHER_ERRORS = 0
 GLOBAL_TOTAL_URLS = 0
 GLOBAL_START_TIME = time.time()
@@ -137,7 +132,7 @@ def crawl_site(site, args, target_urls=None):
     """
     Crawls a single site. This function can be called sequentially or in parallel.
     """
-    global GLOBAL_TOTAL_URLS, GLOBAL_SUCCESS, GLOBAL_429_ERRORS, GLOBAL_OTHER_ERRORS, LAST_ACTIVITY_TIME
+    global GLOBAL_TOTAL_URLS, GLOBAL_SUCCESS, GLOBAL_THROTTLE_ERRORS, GLOBAL_OTHER_ERRORS, LAST_ACTIVITY_TIME
     siteid = site["siteid"]
     custid = site["custid"]
 
@@ -410,7 +405,7 @@ def crawl_site(site, args, target_urls=None):
             "failed": sum(getattr(w, 'js_render_stats', {}).get("failed", 0) for w in all_active_workers)
         }
         combined_fails = defaultdict(int)
-        total_429s = sum(getattr(w, 'failed_429_count', 0) for w in all_active_workers)
+        total_throttles = sum(getattr(w, 'failed_throttle_count', 0) for w in all_active_workers)
         for w in all_active_workers:
             for reason, count in getattr(w, 'failure_reasons', {}).items():
                 combined_fails[reason] += count
@@ -427,7 +422,7 @@ def crawl_site(site, args, target_urls=None):
             "total_attempted": total_visited,
             "new_saved": total_saved,
             "db_existed": total_db_existed,
-            "total_429s": total_429s,
+            "total_throttles": total_throttles,
             "duration": duration,
             "new_urls": all_new_urls,
             "has_existing_data": initial_has_data, 
@@ -450,7 +445,7 @@ def crawl_site(site, args, target_urls=None):
             f"{'  - Redirects':<25} | {total_redirects:<7} | (Found during discovery)",
             f"{'  - SkipRules/Policy':<25} | {total_skipped_rules + total_policy_skipped:<7} | (Filtered out by config)",
             f"{'  - Failures':<25} | {total_failed:<7} | (Network/Server errors)",
-            f"{'  - 429 Rate Limits':<25} | {total_429s:<7} | (May be recovered)",
+            f"{'  - 429/503 Throttles':<25} | {total_throttles:<7} | (May be recovered)",
             "-" * 70,
             f"{'JS Rendering':<25} | {js_renders['total']:<7} | (Success: {js_renders['success']} | Failed: {js_renders['failed']})",
             f"{'Failure Details':<25} | {total_failed:<7} | ({fail_details})",
@@ -467,7 +462,7 @@ def crawl_site(site, args, target_urls=None):
             else:
                 GLOBAL_TOTAL_URLS += total_saved
             GLOBAL_SUCCESS += total_saved
-            GLOBAL_429_ERRORS += sum(getattr(w, 'failed_429_count', 0) for w in workers)
+            GLOBAL_THROTTLE_ERRORS += total_throttles
             GLOBAL_OTHER_ERRORS += total_failed
 
         with site_skip_lock:
@@ -571,8 +566,18 @@ def main():
         file_handler.setFormatter(CompanyFormatter())
         logger.addHandler(file_handler)
         
+        # --- SYMLINK LATEST LOG ---
+        try:
+            latest_path = os.path.join("logs", "latest.log")
+            if os.path.lexists(latest_path):
+                os.remove(latest_path)
+            # Use relative symlink for portability
+            os.symlink(os.path.relpath(log_path, "logs"), latest_path)
+        except Exception as e:
+            logger.warning(f"Could not create symlink to latest log: {e}")
+
         logger.info(f"--- Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-        logger.info(f"Log file: {log_path}")
+        logger.info(f"Log file: {log_path} (linked as logs/latest.log)")
 
     # ---------------- EXECUTION ----------------
     try:
@@ -642,11 +647,11 @@ def main():
                     total_f = sum(fail_reasons.values())
                     f_details = ", ".join([f"{k}:{v}" for k, v in fail_reasons.items()])
                     
-                    # Include 429s in the failures string if they exist
-                    f_429 = s.get('total_429s', 0)
+                    # Include Throttles (429/503) in the failures string if they exist
+                    f_throttle = s.get('total_throttles', 0)
                     f_str = f"{total_f} ({f_details})" if total_f > 0 else "0"
-                    if f_429 > 0:
-                        f_str = f"{f_str} [429:{f_429}]"
+                    if f_throttle > 0:
+                        f_str = f"{f_str} [T:{f_throttle}]"
                     
                     table_lines.append(f"{s['siteid']:<8} | {url_short:<22} | {s['total_attempted']:<7} | {s['new_saved']:<5} | {s['db_existed']:<5} | {f_str:<20} | {s['duration']:>6.1f}s")
                 

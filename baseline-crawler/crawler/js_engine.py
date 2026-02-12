@@ -216,7 +216,8 @@ class JSRenderWorker(threading.Thread):
     def render(self, url: str, timeout: int = 30) -> tuple[str, str]:
         event = {"done": threading.Event(), "html": None, "final_url": None, "error": None}
         self.queue.put((url, event))
-        event["done"].wait(timeout=timeout)
+        if not event["done"].wait(timeout=timeout):
+            raise TimeoutError(f"JS rendering timed out after {timeout}s for {url}")
         if event["error"]:
             raise event["error"]
         return event["html"], event["final_url"]
