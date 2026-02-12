@@ -2,8 +2,8 @@ import re
 import sys
 import os
 
-# Set this to True if you want to import into an existing table
-MERGE_MODE = True 
+# Configuration
+TARGET_TABLE = "defacement_sites_migrate"
 
 def transform_siteid(old_siteid):
     """
@@ -12,6 +12,9 @@ def transform_siteid(old_siteid):
     - 10108-1 -> siteid: 10108, baseline_id: 10108-2
     """
     old_siteid = old_siteid.strip("'\"")
+    if not old_siteid or old_siteid.lower() == 'null':
+        return 'NULL', 'NULL'
+        
     if '-' in old_siteid:
         # It's a child url
         parts = old_siteid.split('-')
@@ -174,47 +177,39 @@ def split_sql_statements(content):
     return statements
 
 def migrate_sql(input_file, output_file):
-    print(f"Migrating {input_file} to {output_file} (Merge Mode: {MERGE_MODE})...")
+    print(f"Migrating {input_file} to {output_file}...")
     
+    if not os.path.exists(input_file):
+        print(f"Error: Input file {input_file} not found.")
+        return
+
     with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
         content = f.read()
 
     processed_statements = []
 
-    if MERGE_MODE:
-        # 1. Ensure column exists
-        alter_stmt = "ALTER TABLE `defacement_sites` ADD COLUMN IF NOT EXISTS `baseline_id` varchar(100) DEFAULT NULL AFTER `siteid`;\n"
-        processed_statements.append(alter_stmt)
-
     # 2. Split into statements and process
     statements = split_sql_statements(content)
     
     for stmt in statements:
-        if MERGE_MODE:
-            # Skip table drop/create
-            if re.search(r"CREATE TABLE `defacement_sites`|DROP TABLE IF EXISTS `defacement_sites`|TRUNCATE TABLE `defacement_sites`", stmt, flags=re.IGNORECASE):
-                continue
+        # --- EXCLUSION LOGIC ---
+        # 1. Skip cleanup commands
+        if re.search(r"(DROP TABLE|TRUNCATE TABLE)\s+IF EXISTS\s+`?defacement_sites`?", stmt, flags=re.IGNORECASE):
+            continue
             
-            # Skip index modifications
-            if re.search(r"ALTER TABLE `defacement_sites`[\s\n]+ADD (?:PRIMARY KEY|UNIQUE KEY|KEY|FULLTEXT KEY|CONSTRAINT)", stmt, flags=re.IGNORECASE):
-                continue
-            
-            # Skip Auto-Increment settings
-            if re.search(r"ALTER TABLE `defacement_sites`[\s\n]+MODIFY `id` .* AUTO_INCREMENT=.*", stmt, flags=re.IGNORECASE):
-                continue
+        # --- TRANSFORMATION LOGIC ---
 
-        # Process INSERT
-        if re.search(r"INSERT INTO `defacement_sites`", stmt, flags=re.IGNORECASE):
-            # Update Column List
-            if MERGE_MODE:
-                # 1. Remove `id` from column list for safe merging
-                stmt = re.sub(r"INSERT INTO `defacement_sites` \(`id`, ", r"INSERT INTO `defacement_sites` (", stmt, flags=re.IGNORECASE)
-            
-            # 2. Add baseline_id to column list
-            insert_head_pattern = r"(INSERT INTO `defacement_sites` \([^)]*`siteid`)((?:, [^)]*)?\))"
+        # 1. Rename only the table name (using word boundaries \b)
+        # This keeps index names like idx_defacement_sites_url exactly as they are.
+        stmt = re.sub(r"\bdefacement_sites\b", TARGET_TABLE, stmt, flags=re.IGNORECASE)
+
+        # 2. Process INSERT statements
+        if re.search(rf"INSERT INTO `{TARGET_TABLE}`", stmt, flags=re.IGNORECASE):
+            # A. Add baseline_id to column list
+            insert_head_pattern = r"(INSERT INTO `[^`]+` \([^)]*`siteid`)((?:, [^)]*)?\))"
             stmt = re.sub(insert_head_pattern, r"\1, `baseline_id`\2", stmt, flags=re.IGNORECASE)
             
-            # Process VALUES
+            # B. Process VALUES
             match = re.search(r"(.*?VALUES)(.*);", stmt, flags=re.IGNORECASE | re.DOTALL)
             if match:
                 header = match.group(1)
@@ -223,17 +218,11 @@ def migrate_sql(input_file, output_file):
                 rows = extract_rows(values_str)
                 processed_rows = []
                 for row in rows:
-                    inner_content = row[1:-1]
+                    inner_content = row[1:-1] # Strip (...)
                     values = split_sql_row(inner_content)
                     
-                    if MERGE_MODE and len(values) > 0:
-                        # Strip original ID (index 0)
-                        values.pop(0)
-                        
-                        # Indices shifted: siteid is now at 6
-                        siteid_idx = 6
-                    else:
-                        siteid_idx = 7
+                    # siteid is at index 7 (id, url, group_id, email, email_cc1, email_cc2, action, siteid)
+                    siteid_idx = 7
 
                     if len(values) > siteid_idx:
                         old_siteid = values[siteid_idx].strip()
@@ -243,34 +232,34 @@ def migrate_sql(input_file, output_file):
                         values.insert(siteid_idx + 1, " " + new_baseline_id_val)
                         processed_rows.append("(" + ",".join(values) + ")")
                     else:
+                        print(f"Warning: Skipping row transformation due to insufficient columns: {row[:50]}...")
                         processed_rows.append(row)
                 
-                # Combine rows and add ON DUPLICATE KEY UPDATE for Merge Mode
-                stmt = header + "\n" + ",\n".join(processed_rows)
-                if MERGE_MODE:
-                    # Specifically only update siteid and baseline_id if row already exists
-                    # We also set timestamp = timestamp to prevent the ON UPDATE CURRENT_TIMESTAMP from firing
-                    stmt += "\nON DUPLICATE KEY UPDATE `siteid` = VALUES(`siteid`), `baseline_id` = VALUES(`baseline_id`), `timestamp` = `timestamp`;"
-                else:
-                    stmt += ";"
+                stmt = header + "\n" + ",\n".join(processed_rows) + ";"
         
-        elif not MERGE_MODE:
-            # Fresh mode: update CREATE TABLE
+        # 3. Process CREATE TABLE statement
+        elif re.search(rf"CREATE TABLE `{TARGET_TABLE}`", stmt, flags=re.IGNORECASE):
+            # Look for siteid definition and add baseline_id after it
             table_pattern = r"(`siteid` varchar\(100\) NOT NULL,)"
-            stmt = re.sub(table_pattern, r"\1\n  `baseline_id` varchar(100) DEFAULT NULL,", stmt)
+            if re.search(table_pattern, stmt):
+                stmt = re.sub(table_pattern, r"\1\n  `baseline_id` varchar(100) DEFAULT NULL,", stmt)
 
         processed_statements.append(stmt)
 
     with open(output_file, 'w', encoding='utf-8') as f:
-        f.write("".join(processed_statements))
+        # Handle database renaming in comments
+        output_content = "".join(processed_statements)
+        output_content = output_content.replace("Database: `devadminsitewall_waf`", "Database: `devadminsitewall_waf_migrate`")
+        f.write(output_content)
     
-    print("Migration complete!")
+    print(f"Migration complete! Output saved to {output_file}")
 
 if __name__ == "__main__":
-    input_path = "/home/priti/Web-Crawler/Web_Crawler/defacement_sites (1) (1).sql"
-    output_path = "/home/priti/Web-Crawler/Web_Crawler/defacement_sites_migrated.sql"
-    
-    if os.path.exists(input_path):
-        migrate_sql(input_path, output_path)
+    if len(sys.argv) > 1:
+        input_path = sys.argv[1]
+        output_path = sys.argv[2] if len(sys.argv) > 2 else input_path.replace(".sql", "_migrated.sql")
     else:
-        print(f"Error: No file found at {input_path}")
+        input_path = "/home/priti/Web-Crawler/Web_Crawler/defacement_sites_dev.sql"
+        output_path = "/home/priti/Downloads/defacement_sites_dev_migrated.sql"
+    
+    migrate_sql(input_path, output_path)
