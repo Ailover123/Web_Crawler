@@ -212,6 +212,18 @@ class CrawlerWorker(threading.Thread):
         self.new_urls = []
         self.js_render_stats = {"total": 0, "success": 0, "failed": 0}
         self.failure_reasons = defaultdict(int)
+        self.failed_429_count = 0
+
+    def is_soft_redirect(self, html: str) -> bool:
+        if not html: return False
+        h = html.lower()
+        # Standard Meta/JS redirects
+        if 'http-equiv="refresh"' in h or 'window.location' in h:
+            return True
+        # Sucuri Cloudproxy anti-bot challenge
+        if 'sucuri_cloudproxy_js' in h or 'sucuri.net/using-firewall' in h:
+            return True
+        return False
 
     def _db_url(self, url):
         p = urlparse(url)
@@ -231,9 +243,8 @@ class CrawlerWorker(threading.Thread):
         self.log("info", f"started ({self.crawl_mode})")
         while self.running:
             remaining = TrafficControl.get_remaining_pause(self.siteid)
-            with self.skip_lock:
-                if remaining > 0:
-                     time.sleep(remaining)
+            if remaining > 0:
+                 time.sleep(remaining)
 
             item, found = self.frontier.dequeue()
             if not found:
@@ -256,10 +267,9 @@ class CrawlerWorker(threading.Thread):
                 # -------------------------------
                 
                 # Check 429 backoff again accurately before fetch
-                if TrafficControl.get_remaining_pause(self.siteid) > 0:
-                     self.frontier.enqueue(url, discovered_from, depth, preference_url=self.original_site_url)
-                     self.frontier.mark_visited(url, got_task=True, preference_url=self.original_site_url) # Mark "done" so we don't hang, but re-queued
-                     continue
+                remaining = TrafficControl.get_remaining_pause(self.siteid)
+                if remaining > 0:
+                     time.sleep(remaining)
 
                 if CRAWL_DELAY > 0:
                     time.sleep(CRAWL_DELAY)
@@ -267,12 +277,37 @@ class CrawlerWorker(threading.Thread):
                 fetch_url = LinkUtility.force_www_url(url)
                 result = PageFetcher.fetch(fetch_url, siteid=self.siteid, referer=discovered_from)
                 
+                if result.get("error") and "429" in str(result["error"]):
+                    self.failed_429_count += 1
+                
                 if not result["success"]:
-                    self.failed_count += 1
-                    reason = result.get("error", "Unknown Fetch Error")
-                    self.failure_reasons[reason] += 1
-                    self.log("error", f"Fetch failed for {url}: {reason}")
-                    continue
+                    # Handle soft redirects on 404/ignored
+                    if result.get("html") and self.is_soft_redirect(result["html"]):
+                        self.log("info", f"Soft Redirect detected for {url}. Escalating to JS Rendering...")
+                        self.js_render_stats["total"] += 1
+                        try:
+                            html, final_url = JS_RENDERER.render(url)
+                            self.js_render_stats["success"] += 1
+                            if final_url:
+                                result["success"] = True
+                                result["final_url"] = final_url
+                                # Fake a successful response object
+                                result["response"] = type('obj', (object,), {
+                                    'status_code': 200,
+                                    'headers': {'Content-Type': 'text/html'},
+                                    'content': html.encode(),
+                                    'text': html
+                                })
+                        except Exception as js_err:
+                            self.js_render_stats["failed"] += 1
+                            self.log("error", f"JS Render escalation failed: {js_err}")
+
+                    if not result["success"]:
+                        self.failed_count += 1
+                        reason = result.get("error", "Unknown Fetch Error")
+                        self.failure_reasons[reason] += 1
+                        self.log("error", f"Fetch failed for {url}: {reason}")
+                        continue
 
                 resp = result["response"]
                 final_url = result.get("final_url", url)
@@ -342,7 +377,8 @@ class CrawlerWorker(threading.Thread):
                         self.log("info", f"Skipped: rules={policy_skipped}, domain={domain_skipped}")
 
                 if self.crawl_mode == "BASELINE":
-                    save_baseline(custid=self.custid, siteid=self.siteid, url=self._db_url(url), html=html, base_url=self.seed_url)
+                    b_id, b_path, b_action = save_baseline(custid=self.custid, siteid=self.siteid, url=self._db_url(url), html=html, base_url=self.seed_url)
+                    self.log("info", f"DB: {b_action.upper()} baseline {b_id}")
                 elif self.crawl_mode == "COMPARE":
                     engine = CompareEngine(custid=self.custid)
                     res = engine.handle_page(siteid=self.siteid, url=self._db_url(url), html=html)

@@ -17,9 +17,20 @@ import os
 import requests
 import urllib3
 import sys
+import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+class FlushingFileHandler(logging.FileHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+        if self.stream:
+            try:
+                os.fsync(self.stream.fileno())
+            except Exception:
+                pass
 
 from report_generator import generate_report
 
@@ -269,6 +280,7 @@ def crawl_site(site, args, target_urls=None):
 
         siteid_map = {siteid: siteid}
         workers = []
+        retired_workers = []
         try:
             for i in range(MIN_WORKERS):
                 w = CrawlerWorker(
@@ -309,6 +321,7 @@ def crawl_site(site, args, target_urls=None):
                         if len(workers) > MIN_WORKERS:
                             w = workers.pop()
                             w.stop()
+                            retired_workers.append(w)
                     TrafficControl.reset_scale_down(siteid)
                 
                 if qsize > 100 and len(workers) < MAX_WORKERS:
@@ -341,13 +354,14 @@ def crawl_site(site, args, target_urls=None):
                     
         finally:
             # 🛑 CRITICAL: Always signal workers to stop and wait for them
-            job_logger.info(f"Stopping workers for site {siteid}...")
-            for w in workers:
+            all_active_workers = workers + retired_workers
+            job_logger.info(f"Stopping {len(all_active_workers)} workers for site {siteid}...")
+            for w in all_active_workers:
                 w.stop()
             
             # Wait with a "Hang Alert" loop
             start_join = time.time()
-            for w in workers:
+            for w in all_active_workers:
                 if w.is_alive():
                     # Wait in small chunks to allow logging if it takes too long
                     while w.is_alive():
@@ -373,15 +387,15 @@ def crawl_site(site, args, target_urls=None):
         stats = frontier.get_stats()
         complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
 
-        total_saved = sum(getattr(w, 'saved_count', 0) for w in workers)
-        total_failed = sum(getattr(w, 'failed_count', 0) for w in workers)
-        total_policy_skipped = sum(getattr(w, 'policy_skipped_count', 0) for w in workers)
-        total_frontier_skips = sum(getattr(w, 'frontier_duplicate_count', 0) for w in workers)
+        total_saved = sum(getattr(w, 'saved_count', 0) for w in all_active_workers)
+        total_failed = sum(getattr(w, 'failed_count', 0) for w in all_active_workers)
+        total_policy_skipped = sum(getattr(w, 'policy_skipped_count', 0) for w in all_active_workers)
+        total_frontier_skips = sum(getattr(w, 'frontier_duplicate_count', 0) for w in all_active_workers)
         total_skipped_rules = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_skip_report.values())
         
         # 🛡️ Deduplicate "Existed" URLs per site session to match DB row count accurately
         all_existed_urls = set()
-        for w in workers:
+        for w in all_active_workers:
             all_existed_urls.update(getattr(w, 'existed_urls', set()))
         total_db_existed = len(all_existed_urls)
 
@@ -389,20 +403,21 @@ def crawl_site(site, args, target_urls=None):
         total_visited = total_saved + total_duplicates + total_skipped_rules + total_failed + total_policy_skipped
         
         # Aggregating metrics from workers
-        total_redirects = sum(getattr(w, 'redirect_count', 0) for w in workers)
+        total_redirects = sum(getattr(w, 'redirect_count', 0) for w in all_active_workers)
         js_renders = {
-            "total": sum(getattr(w, 'js_render_stats', {}).get("total", 0) for w in workers),
-            "success": sum(getattr(w, 'js_render_stats', {}).get("success", 0) for w in workers),
-            "failed": sum(getattr(w, 'js_render_stats', {}).get("failed", 0) for w in workers)
+            "total": sum(getattr(w, 'js_render_stats', {}).get("total", 0) for w in all_active_workers),
+            "success": sum(getattr(w, 'js_render_stats', {}).get("success", 0) for w in all_active_workers),
+            "failed": sum(getattr(w, 'js_render_stats', {}).get("failed", 0) for w in all_active_workers)
         }
         combined_fails = defaultdict(int)
-        for w in workers:
+        total_429s = sum(getattr(w, 'failed_429_count', 0) for w in all_active_workers)
+        for w in all_active_workers:
             for reason, count in getattr(w, 'failure_reasons', {}).items():
                 combined_fails[reason] += count
 
         # Collect session data early to be safe
         all_new_urls = []
-        for w in workers:
+        for w in all_active_workers:
             all_new_urls.extend(getattr(w, 'new_urls', []))
 
         session_entry = {
@@ -412,6 +427,7 @@ def crawl_site(site, args, target_urls=None):
             "total_attempted": total_visited,
             "new_saved": total_saved,
             "db_existed": total_db_existed,
+            "total_429s": total_429s,
             "duration": duration,
             "new_urls": all_new_urls,
             "has_existing_data": initial_has_data, 
@@ -434,6 +450,7 @@ def crawl_site(site, args, target_urls=None):
             f"{'  - Redirects':<25} | {total_redirects:<7} | (Found during discovery)",
             f"{'  - SkipRules/Policy':<25} | {total_skipped_rules + total_policy_skipped:<7} | (Filtered out by config)",
             f"{'  - Failures':<25} | {total_failed:<7} | (Network/Server errors)",
+            f"{'  - 429 Rate Limits':<25} | {total_429s:<7} | (May be recovered)",
             "-" * 70,
             f"{'JS Rendering':<25} | {js_renders['total']:<7} | (Success: {js_renders['success']} | Failed: {js_renders['failed']})",
             f"{'Failure Details':<25} | {total_failed:<7} | ({fail_details})",
@@ -550,7 +567,7 @@ def main():
         
         # Manually attach FileHandler since setup_logger returns early if handlers exist
         
-        file_handler = logging.FileHandler(log_path)
+        file_handler = FlushingFileHandler(log_path)
         file_handler.setFormatter(CompanyFormatter())
         logger.addHandler(file_handler)
         
@@ -586,6 +603,8 @@ def main():
                         site = future_to_site[future]
                         try:
                             future.result(timeout=site_timeout)
+                            if file_handler:
+                                file_handler.flush()
                             
                             # Reset watchdog
                             global LAST_ACTIVITY_TIME
@@ -601,6 +620,8 @@ def main():
         else:
             for site in sites:
                 crawl_site(site, args, target_urls)
+                if file_handler:
+                    file_handler.flush()
     finally:
         if file_handler:
             total_duration = time.time() - GLOBAL_START_TIME
@@ -620,7 +641,13 @@ def main():
                     fail_reasons = s.get('failure_reasons', {})
                     total_f = sum(fail_reasons.values())
                     f_details = ", ".join([f"{k}:{v}" for k, v in fail_reasons.items()])
+                    
+                    # Include 429s in the failures string if they exist
+                    f_429 = s.get('total_429s', 0)
                     f_str = f"{total_f} ({f_details})" if total_f > 0 else "0"
+                    if f_429 > 0:
+                        f_str = f"{f_str} [429:{f_429}]"
+                    
                     table_lines.append(f"{s['siteid']:<8} | {url_short:<22} | {s['total_attempted']:<7} | {s['new_saved']:<5} | {s['db_existed']:<5} | {f_str:<20} | {s['duration']:>6.1f}s")
                 
                 total_total_attempted = sum(s['total_attempted'] for s in GLOBAL_SESSIONS)

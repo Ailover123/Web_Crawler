@@ -112,6 +112,7 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
         normalized_url=normalized_url,
         content_hash=content_hash,
         baseline_path=str(path),
+        baseline_id=baseline_id,
         base_url=base_url,
     )
 
@@ -119,15 +120,5 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
     # 3️⃣ Overwrite the SAME file every time
     # --------------------------------------------------
     path.write_text(html.strip(), encoding="utf-8")
-
-    # --------------------------------------------------
-    # 4️⃣ Ensure defacement_sites points to baseline_id
-    # --------------------------------------------------
-    insert_defacement_site(
-        siteid=siteid,
-        baseline_id=baseline_id,
-        url=url,
-        base_url=base_url,
-    )
 
     return baseline_id, str(path), action

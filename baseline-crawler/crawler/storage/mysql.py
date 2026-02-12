@@ -168,7 +168,7 @@ def fetch_enabled_sites():
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT siteid, custid, url FROM sites")
+        cur.execute("SELECT siteid, custid, url FROM sites WHERE enabled = 1")
         return cur.fetchall()
     finally:
         cur.close()
@@ -444,7 +444,7 @@ def _has_column(table_name, column_name):
         conn.close()
         DB_SEMAPHORE.release()
 
-def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, base_url=None):
+def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, baseline_id=None, base_url=None):
     """
     Insert or UPDATE baseline for a URL.
     Manually checks for existence to handle cases where DB Unique Constraints might be missing.
@@ -460,60 +460,73 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
     try:
         cur = conn.cursor(buffered=True)
         
-        # 1. 🔍 Check via SELECT to avoid duplicates if constraints are missing
+        # 1. 📂 MASTER INSERT: baseline_pages (Definitive Record)
+        cur.execute(
+            """
+            INSERT INTO baseline_pages 
+                (site_id, normalized_url, content_hash, baseline_path)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                content_hash = VALUES(content_hash),
+                baseline_path = VALUES(baseline_path),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (site_id, canonical_url, content_hash, baseline_path),
+        )
+
+        # 2. 🔍 COMPARE SYNC: defacement_sites
         cur.execute(
             "SELECT id FROM defacement_sites WHERE siteid=%s AND url=%s",
             (site_id, canonical_url)
         )
         row = cur.fetchone()
         try:
-            # Consume any remaining results (though fetchone implies one)
             cur.fetchall()
         except Exception:
             pass
         
         if row:
-            # 2. 🔄 UPDATE
             if has_updated_at:
                 cur.execute(
                     """
                     UPDATE defacement_sites
                     SET content_hash = %s,
                         baseline_path = %s,
+                        baseline_id = %s,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                     """,
-                    (content_hash, baseline_path, row[0]),
+                    (content_hash, baseline_path, baseline_id, row[0]),
                 )
             else:
                 cur.execute(
                     """
                     UPDATE defacement_sites
                     SET content_hash = %s,
-                        baseline_path = %s
+                        baseline_path = %s,
+                        baseline_id = %s
                     WHERE id = %s
                     """,
-                    (content_hash, baseline_path, row[0]),
+                    (content_hash, baseline_path, baseline_id, row[0]),
                 )
         else:
-            # 3. 🆕 INSERT
             if has_updated_at:
                 cur.execute(
                     """
                     INSERT INTO defacement_sites
-                        (siteid, url, content_hash, baseline_path, updated_at)
-                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        (siteid, url, content_hash, baseline_path, baseline_id, action, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, 'selected', CURRENT_TIMESTAMP)
                     """,
-                    (site_id, canonical_url, content_hash, baseline_path),
+                    (site_id, canonical_url, content_hash, baseline_path, baseline_id),
                 )
             else:
                 cur.execute(
                     """
                     INSERT INTO defacement_sites
-                        (siteid, url, content_hash, baseline_path)
-                    VALUES (%s, %s, %s, %s)
+                        (siteid, url, content_hash, baseline_path, baseline_id, action)
+                    VALUES (%s, %s, %s, %s, %s, 'selected')
                     """,
-                    (site_id, canonical_url, content_hash, baseline_path),
+                    (site_id, canonical_url, content_hash, baseline_path, baseline_id),
                 )
             
         conn.commit()
@@ -523,8 +536,7 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
         conn.close()
         DB_SEMAPHORE.release()
 
-
-
+def fetch_baseline_hash(site_id, normalized_url, base_url=None):
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True, buffered=True)
@@ -533,8 +545,8 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
         cur.execute(
             """
             SELECT content_hash, baseline_path
-            FROM defacement_sites
-            WHERE siteid=%s AND url=%s
+            FROM baseline_pages
+            WHERE site_id=%s AND normalized_url=%s
             """,
             (site_id, canonical_url),
         )
@@ -555,7 +567,7 @@ def site_has_baselines(site_id):
     try:
         cur = conn.cursor(buffered=True)
         cur.execute(
-            "SELECT 1 FROM defacement_sites WHERE siteid=%s AND content_hash IS NOT NULL LIMIT 1",
+            "SELECT 1 FROM baseline_pages WHERE site_id=%s LIMIT 1",
             (site_id,),
         )
         row = cur.fetchone()

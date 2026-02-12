@@ -33,9 +33,7 @@ class LinkUtility:
         scheme = parsed.scheme or "https"
         netloc = parsed.netloc.lower()
         path = parsed.path if parsed.path else "/"
-        # Robust encoding: unquote first to avoid double encoding, then quote
-        path = quote(unquote(path))
-        while '//' in path: path = path.replace('//', '/')
+        # Strip trailing slash to avoid duplicate fetches
         path = path.rstrip("/")
         if not path: path = "/"
         query = parsed.query
@@ -100,7 +98,7 @@ class TrafficControl:
                 if cls.SITE_PAUSES.get(siteid, 0) < now:
                     cls.SITE_SCALE_DOWN_REQUESTS[siteid] = True
                     url_info = f" on {url}" if url else ""
-                    logger.warning(f"[THROTTLE] Site {siteid} hit 429{url_info}. Setting DOMAIN-WIDE PAUSE for {seconds}s and requesting SCALE DOWN.")
+                    logger.info(f"[THROTTLE] Site {siteid} hit 429{url_info}. Setting DOMAIN-WIDE PAUSE for {seconds}s and requesting SCALE DOWN.")
                 cls.SITE_PAUSES[siteid] = max(cls.SITE_PAUSES.get(siteid, 0), until)
             else:
                 if cls.SITE_PAUSES.get(siteid, 0) > now:
@@ -135,8 +133,7 @@ class PageFetcher:
         if siteid:
             remaining = TrafficControl.get_remaining_pause(siteid)
             if remaining > 0:
-                # Use debug for pre-fetch wait to reduce log noise
-                logger.debug(f"[THROTTLE] Pre-fetch pause active for site {siteid}. Waiting {remaining:.1f}s...")
+                logger.info(f"[THROTTLE] Pre-fetch pause active for site {siteid}. Waiting {remaining:.1f}s...")
                 time.sleep(remaining)
 
         max_retries = 3
@@ -174,6 +171,7 @@ class PageFetcher:
                         logger.warning(f"[RETRY {attempt+1}/{max_retries}] 429 Rate Limit for {url}. Waiting locally for {retry_delay}s...")
                         time.sleep(retry_delay)
                         retry_delay *= 2
+                        logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
                         continue
                     else:
                         logger.error(f"429 Rate Limit persisted for {url} after {max_retries} retries. Final 5s pause.")
@@ -190,6 +188,14 @@ class PageFetcher:
                         "content_type": content_type,
                         "error": None if success else f"ignored content type: {content_type}"
                     }
+                elif r.status_code == 307:
+                    # 🛡️ Sucuri / anti-bot challenge often uses 307 with JS instead of Location header
+                    return {
+                        "success": False, "error": f"http error: {r.status_code}",
+                        "response": r, "final_url": r.url,
+                        "content_type": content_type, "fetch_time_ms": fetch_time_ms,
+                        "html": r.text if "text/html" in content_type else "",
+                    }
                 else:
                     return {
                         "success": False, "error": f"http error: {r.status_code}",
@@ -203,6 +209,7 @@ class PageFetcher:
                     logger.warning(f"[RETRY {attempt+1}/{max_retries}] {err_type} for {url}: {e}. Waiting {retry_delay}s...")
                     time.sleep(retry_delay)
                     retry_delay *= 2
+                    logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
                     continue
                 return {"success": False, "error": str(e), "content_type": "", "fetch_time_ms": int((time.time() - start_time) * 1000)}
 
@@ -243,14 +250,11 @@ class LinkExtractor:
             if not href or href.startswith('#') or href.startswith('mailto:') or href.startswith('tel:'): continue
             
             # Heuristic for domain-prefixed links (e.g., allianceproit.com/services)
-            # if it looks like it starts with a domain but missing scheme, force it absolute
             if not href.startswith('/') and '://' not in href and not href.startswith('#'):
                 first_part = href.split('/')[0].lower()
-                # Looser check: if it looks like a domain name (has a dot and common tld or matches current netloc)
                 if '.' in first_part and not first_part.startswith('.'):
                     current_netloc = urlparse(base_url).netloc.lower().replace('www.', '')
                     clean_cand = first_part.replace('www.', '')
-                    # If it matches current site or looks like a typical domain we are interested in
                     if clean_cand == current_netloc or clean_cand.split('.')[0] in current_netloc:
                         href = f"{urlparse(base_url).scheme or 'https'}://{href}"
 
@@ -260,6 +264,14 @@ class LinkExtractor:
 
         for img in soup.find_all('img', src=True):
             asset_url = strip_fragment(urljoin(base_url, img['src']))
+            if LinkExtractor._is_allowed_url(asset_url, base_domain): assets.append(asset_url)
+
+        for link in soup.find_all('link', href=True):
+            asset_url = strip_fragment(urljoin(base_url, link['href']))
+            if LinkExtractor._is_allowed_url(asset_url, base_domain): assets.append(asset_url)
+
+        for script in soup.find_all('script', src=True):
+            asset_url = strip_fragment(urljoin(base_url, script['src']))
             if LinkExtractor._is_allowed_url(asset_url, base_domain): assets.append(asset_url)
 
         return urls, assets
@@ -285,6 +297,12 @@ class ContentNormalizer:
         re.compile(r'(?i)\b[\w:-]*nonce[\w:-]*\s*=\s*["\'](?:[^"\\]|\\.)*["\']'),
         re.compile(r'(?i)\bvalue\s*=\s*["\'](?:[^"\\]|\\.)*["\']'),
         re.compile(r'(?i)\bid\s*=\s*["\'][^"\']*["\']'),
+        re.compile(r'(?i)"floatingButtonsClickTracking"\s*:\s*["\'](?:[^"\\]|\\.)*["\']'),
+        re.compile(r'(?i)\baria-controls\s*=\s*["\'][^"\']*["\']'),
+        re.compile(r'(?i)\baria-labelledby\s*=\s*["\'][^"\']*["\']'),
+        re.compile(r'(?i)\bdata-smartmenus-id\s*=\s*["\'][^"\']*["\']'),
+        re.compile(r'(?i)\bname\s*=\s*["\'][^"\']*["\']'),
+        re.compile(r'(?i)\bcb\s*=\s*["\'][^"\']*["\']'),
     ]
 
     @classmethod
