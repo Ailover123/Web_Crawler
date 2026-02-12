@@ -3,8 +3,7 @@ from datetime import datetime, timedelta
 
 from crawler.processor import LinkUtility, ContentNormalizer
 from crawler.storage.baseline_reader import get_baseline_hash
-from crawler.storage.mysql import insert_observed_page, fetch_observed_page
-from crawler.defacement_sites import get_selected_defacement_rows
+from crawler.storage.mysql import insert_observed_page, fetch_observed_page, get_selected_defacement_rows
 from crawler.core import logger
 
 DIFF_ROOT = Path("diffs")
@@ -77,6 +76,10 @@ class CompareEngine:
         # Match against defacement_sites
         # --------------------------------------------------
         for row in rows:
+            # 🛡️ Fix cross-site pollution: Ensure we only match baselines for THIS site
+            if row.get("siteid") != siteid:
+                continue
+
             row_base = row.get("base_url")
             row_canon = _canon(row["url"], row_base)
             row_slash = row_canon if row_canon.endswith("/") else row_canon + "/"
