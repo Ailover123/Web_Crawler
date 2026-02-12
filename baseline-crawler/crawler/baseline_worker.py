@@ -6,8 +6,9 @@ import threading
 from crawler.processor import PageFetcher, LinkUtility
 from crawler.storage.crawl_reader import iter_crawl_urls
 from crawler.storage.baseline_store import save_baseline
-from crawler.core import logger, MAX_WORKERS
+from crawler.core import logger, MAX_WORKERS, CRAWL_DELAY
 from crawler.js_engine import JSIntelligence, BrowserManager
+import time
 
 
 class BaselineWorker:
@@ -40,7 +41,11 @@ class BaselineWorker:
             fetch_url = LinkUtility.normalize_url(url, preference_url=self.seed_url)
             fetch_url = LinkUtility.force_www_url(fetch_url)
 
-            result = PageFetcher.fetch(fetch_url)
+            # Polite delay BEFORE fetch
+            time.sleep(CRAWL_DELAY)
+
+            # Pass siteid to allow global TrafficControl & 429 handling
+            result = PageFetcher.fetch(fetch_url, siteid=self.siteid)
             if not result["success"]:
                 return "failed", f"Fetch failed for site={self.siteid} url={url}: {result.get('error')}", thread_name
 
@@ -101,6 +106,9 @@ class BaselineWorker:
         # --------------------------------------------------------
         # Determine input URL source
         # --------------------------------------------------------
+        # --------------------------------------------------------
+        # Determine input URL source
+        # --------------------------------------------------------
         if self.target_urls is not None:
             logger.info(
                 f"[BASELINE] Targeting {len(self.target_urls)} specific URL(s)."
@@ -109,6 +117,42 @@ class BaselineWorker:
         else:
             # STREAMING iterator (CRITICAL FIX)
             url_iter = iter_crawl_urls(siteid=self.siteid)
+
+        # --------------------------------------------------------
+        # 🛡️ PARENT SITE HEALTH CHECK
+        # --------------------------------------------------------
+        # Before spawning workers, check if the seed URL is accessible.
+        # If the main site is down, we skip everything to avoid 100s of retries.
+        logger.info(f"[BASELINE] Health Checking Seed URL: {self.seed_url}")
+        
+        # We perform a single fetch with standard retries. 
+        # If this fails, we assume the site is down/blocking us completely.
+        start_url = LinkUtility.force_www_url(self.seed_url)
+        health_check = PageFetcher.fetch(start_url, siteid=self.siteid)
+        
+        if not health_check["success"]:
+            error_msg = f"Parent site inaccessible: {health_check.get('error')}"
+            logger.error(f"[BASELINE] 🛑 ABORTING SITE {self.siteid}: {error_msg}")
+            
+            # Consume iterator and mark all as failed
+            failed_count = 0
+            failed_list = []
+            
+            for url in url_iter:
+                failed_count += 1
+                failed_list.append({"url": url, "error": error_msg})
+                
+            logger.info(f"[BASELINE] Marked {failed_count} URLs as failed due to parent site outage.")
+            
+            return {
+                "created": 0,
+                "updated": 0,
+                "failed": failed_count,
+                "skipped": 0,
+                "failed_urls": failed_list
+            }
+
+        logger.info(f"[BASELINE] Health Check PASSED. Proceeding with crawl.")
 
         # --------------------------------------------------------
         # Counters
