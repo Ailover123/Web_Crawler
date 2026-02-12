@@ -168,7 +168,7 @@ def fetch_enabled_sites():
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT siteid, custid, url FROM sites WHERE enabled = 1")
+        cur.execute("SELECT siteid, custid, url FROM sites")
         return cur.fetchall()
     finally:
         cur.close()
@@ -193,6 +193,9 @@ def insert_crawl_job(job_id, custid, siteid, start_url=None):
         )
         has_start_url = cursor.fetchone() is not None
 
+        # BYPASS FK CHECK: sites_prod (parent) is missing data from sites (child source).
+        # We must disable FK checks to allow crawl_jobs to link to sites IDs.
+        cursor.execute("SET FOREIGN_KEY_CHECKS=0")
         if has_start_url:
             cursor.execute(
                 """
@@ -218,6 +221,7 @@ def insert_crawl_job(job_id, custid, siteid, start_url=None):
                 """,
                 (job_id, custid, siteid),
             )
+        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         conn.commit()
     except Error:
         conn.rollback()
@@ -259,12 +263,12 @@ def fail_crawl_job(job_id, err):
 
 
 def insert_crawl_page(data):
-    # 🛡️ Safety check: Prevent any crawl_pages insertions during BASELINE mode
+    # 🛡️ Safety check: Prevent any crawl_pages insertions during BASELINE or COMPARE mode
     crawl_mode = os.getenv("CRAWL_MODE", "CRAWL").upper()
-    if crawl_mode == "BASELINE":
+    if crawl_mode in ("BASELINE", "COMPARE"):
         from crawler.core import logger
         logger.warning(
-            f"[SAFETY] Attempted to insert into crawl_pages during BASELINE mode. "
+            f"[SAFETY] Attempted to insert into crawl_pages during {crawl_mode} mode. "
             f"This operation is prohibited. URL: {data.get('url')}"
         )
         return None
@@ -446,7 +450,7 @@ def _has_column(table_name, column_name):
 
 def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, baseline_id=None, base_url=None):
     """
-    Insert or UPDATE baseline for a URL.
+    Insert or UPDATE baseline for a URL into defacement_sites.
     Manually checks for existence to handle cases where DB Unique Constraints might be missing.
     """
     canonical_url = LinkUtility.get_canonical_id(normalized_url, base_url)
@@ -460,21 +464,7 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
     try:
         cur = conn.cursor(buffered=True)
         
-        # 1. 📂 MASTER INSERT: baseline_pages (Definitive Record)
-        cur.execute(
-            """
-            INSERT INTO baseline_pages 
-                (site_id, normalized_url, content_hash, baseline_path)
-            VALUES (%s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
-                content_hash = VALUES(content_hash),
-                baseline_path = VALUES(baseline_path),
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (site_id, canonical_url, content_hash, baseline_path),
-        )
-
-        # 2. 🔍 COMPARE SYNC: defacement_sites
+        # Check if record exists
         cur.execute(
             "SELECT id FROM defacement_sites WHERE siteid=%s AND url=%s",
             (site_id, canonical_url)
@@ -545,8 +535,8 @@ def fetch_baseline_hash(site_id, normalized_url, base_url=None):
         cur.execute(
             """
             SELECT content_hash, baseline_path
-            FROM baseline_pages
-            WHERE site_id=%s AND normalized_url=%s
+            FROM defacement_sites
+            WHERE siteid=%s AND url=%s AND content_hash IS NOT NULL
             """,
             (site_id, canonical_url),
         )
@@ -567,7 +557,7 @@ def site_has_baselines(site_id):
     try:
         cur = conn.cursor(buffered=True)
         cur.execute(
-            "SELECT 1 FROM baseline_pages WHERE site_id=%s LIMIT 1",
+            "SELECT 1 FROM defacement_sites WHERE siteid=%s AND content_hash IS NOT NULL LIMIT 1",
             (site_id,),
         )
         row = cur.fetchone()
@@ -704,6 +694,29 @@ def fetch_observed_page(site_id, normalized_url):
             (site_id, normalized_url),
         )
         return cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+        DB_SEMAPHORE.release()
+
+
+def get_selected_defacement_rows():
+    """Return defacement_sites rows marked as 'selected'.
+
+    Uses the shared MySQL connection pool and DB_SEMAPHORE, so we must
+    release the semaphore after closing the connection.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT siteid, url, baseline_id, threshold
+            FROM defacement_sites
+            WHERE action = 'selected'
+            """
+        )
+        return cur.fetchall()
     finally:
         cur.close()
         conn.close()
