@@ -61,7 +61,7 @@ class BaselineWorker:
             # ----------------------------------------------------
             if JSIntelligence.needs_js_rendering(html_content):
                 try:
-                    rendered_html, final_url = BrowserManager.render_sync(fetch_url)
+                    rendered_html, final_url, js_status = BrowserManager.render_sync(fetch_url)
                     if rendered_html and len(rendered_html) > len(html_content):
                         html_content = rendered_html
                 except Exception as e:

@@ -107,7 +107,7 @@ def resolve_seed_url(raw_url: str) -> str:
     for u in candidates:
         try:
             r = requests.get(
-                u if u.startswith(("http://", "https://")) else "https://" + u,
+                u if u.startswith("https://") else "https://" + u,
                 timeout=12,
                 allow_redirects=True,
                 headers={"User-Agent": USER_AGENT},
@@ -119,7 +119,7 @@ def resolve_seed_url(raw_url: str) -> str:
             continue
 
     # Last-resort fallback
-    if not raw.startswith(("http://", "https://")):
+    if not raw.startswith("https://"):
         raw = "https://" + raw
     return raw
 

@@ -67,15 +67,11 @@ def ensure_baseline_columns(conn):
     try:
         cur = conn.cursor()
         
-        # Check if table exists first
-        cur.execute("SHOW TABLES LIKE 'defacement_sites'")
-        if not cur.fetchone():
-            return
-
-        # Add columns if missing
+        # Add columns if missing to defacement_sites
         cols = [
-            ("content_hash", "VARCHAR(64) NULL"),
-            ("baseline_path", "TEXT NULL"),
+            ("content_hash", "CHAR(64) NULL"),
+            ("baseline_path", "VARCHAR(1024) NULL"),
+            ("baseline_id", "VARCHAR(255) NULL"),
             ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
         ]
         
@@ -168,7 +164,7 @@ def fetch_enabled_sites():
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT siteid, custid, url FROM sites")
+        cur.execute("SELECT siteid, custid, url FROM sites WHERE enabled = 1")
         return cur.fetchall()
     finally:
         cur.close()
@@ -363,7 +359,7 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
     try:
         cur = conn.cursor(buffered=True)
         
-        # 1. Manual Existence Check (Code-level duplicate prevention)
+        # 1. Manual Existence Check
         cur.execute(
             "SELECT id FROM defacement_sites WHERE siteid = %s AND url = %s",
             (siteid, canonical_url)
@@ -375,23 +371,17 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
              pass
         
         if row:
-            # 2. UPDATE existing record
             cur.execute(
-                """
-                UPDATE defacement_sites 
-                SET baseline_id = %s, action = 'selected'
-                WHERE id = %s
-                """,
+                "UPDATE defacement_sites SET action = 'selected', baseline_id = %s WHERE id = %s",
                 (baseline_id, row[0])
             )
         else:
-            # 3. INSERT new record
             cur.execute(
                 """
-                INSERT INTO defacement_sites (siteid, baseline_id, url, action)
+                INSERT INTO defacement_sites (siteid, url, baseline_id, action)
                 VALUES (%s,%s,%s,'selected')
                 """,
-                (siteid, baseline_id, canonical_url),
+                (siteid, canonical_url, baseline_id),
             )
             
         conn.commit()
@@ -451,13 +441,11 @@ def _has_column(table_name, column_name):
 def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, baseline_id=None, base_url=None):
     """
     Insert or UPDATE baseline for a URL into defacement_sites.
-    Manually checks for existence to handle cases where DB Unique Constraints might be missing.
     """
     canonical_url = LinkUtility.get_canonical_id(normalized_url, base_url)
     if not canonical_url:
         return False
 
-    # Check once per process whether updated_at column exists
     has_updated_at = _has_column('defacement_sites', 'updated_at')
 
     conn = get_connection()
@@ -483,6 +471,7 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
                     SET content_hash = %s,
                         baseline_path = %s,
                         baseline_id = %s,
+                        action = 'selected',
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                     """,
@@ -494,30 +483,22 @@ def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, b
                     UPDATE defacement_sites
                     SET content_hash = %s,
                         baseline_path = %s,
-                        baseline_id = %s
+                        baseline_id = %s,
+                        action = 'selected'
                     WHERE id = %s
                     """,
                     (content_hash, baseline_path, baseline_id, row[0]),
                 )
         else:
-            if has_updated_at:
-                cur.execute(
-                    """
-                    INSERT INTO defacement_sites
-                        (siteid, url, content_hash, baseline_path, baseline_id, action, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, 'selected', CURRENT_TIMESTAMP)
-                    """,
-                    (site_id, canonical_url, content_hash, baseline_path, baseline_id),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO defacement_sites
-                        (siteid, url, content_hash, baseline_path, baseline_id, action)
-                    VALUES (%s, %s, %s, %s, %s, 'selected')
-                    """,
-                    (site_id, canonical_url, content_hash, baseline_path, baseline_id),
-                )
+            # If it doesn't exist, we insert it with action='selected'
+            cur.execute(
+                """
+                INSERT INTO defacement_sites
+                    (siteid, url, content_hash, baseline_path, baseline_id, action)
+                VALUES (%s, %s, %s, %s, %s, 'selected')
+                """,
+                (site_id, canonical_url, content_hash, baseline_path, baseline_id),
+            )
             
         conn.commit()
         return True

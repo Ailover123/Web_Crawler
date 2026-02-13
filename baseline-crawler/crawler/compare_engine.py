@@ -77,7 +77,7 @@ class CompareEngine:
         # --------------------------------------------------
         for row in rows:
             # 🛡️ Fix cross-site pollution: Ensure we only match baselines for THIS site
-            if row.get("siteid") != siteid:
+            if str(row.get("siteid")) != str(siteid):
                 continue
 
             row_base = row.get("base_url")

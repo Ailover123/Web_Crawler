@@ -280,24 +280,49 @@ class CrawlerWorker(threading.Thread):
                 if result.get("error") and any(err in str(result["error"]) for err in ("429", "503")):
                     self.failed_throttle_count += 1
                 
+                resp_obj = result.get("response")
+                initial_status = resp_obj.status_code if resp_obj else 0
+
+                # 🛡️ Detect Soft 404 in raw HTML
+                if result["success"] and result.get("html"):
+                    if JSIntelligence.is_404_content(result["html"]):
+                        self.log("info", f"Soft 404 detected in raw HTML for {url}. Tracking as 404.")
+                        result["success"] = False
+                        initial_status = 404
+
                 if not result["success"]:
-                    # Handle soft redirects on 404/ignored
-                    if result.get("html") and self.is_soft_redirect(result["html"]):
-                        self.log("info", f"Soft Redirect detected for {url}. Escalating to JS Rendering...")
+                    # ONLY escalate if it's NOT a 404, OR if it's a known Sucuri/security challenge
+                    is_404 = (initial_status == 404)
+                    has_challenge = 'sucuri' in result.get("html", "").lower() or 'cloudproxy' in result.get("html", "").lower()
+                    
+                    if result.get("html") and self.is_soft_redirect(result["html"]) and (not is_404 or has_challenge):
+                        self.log("info", f"Soft Redirect/Challenge detected for {url} (Status: {initial_status}). Escalating to JS Rendering...")
                         self.js_render_stats["total"] += 1
                         try:
-                            html, final_url = JS_RENDERER.render(url)
+                            html, final_url, js_status = JS_RENDERER.render(url)
                             self.js_render_stats["success"] += 1
-                            if final_url:
+                            
+                            # 🛡️ Detect Soft 404 in RENDERED HTML
+                            if JSIntelligence.is_404_content(html):
+                                self.log("info", f"Soft 404 detected in RENDERED HTML for {url}. Tracking as 404.")
+                                js_status = 404
+
+                            if final_url and 200 <= js_status < 400:
                                 result["success"] = True
                                 result["final_url"] = final_url
-                                # Fake a successful response object
+                                # Fake a successful response object with the REAL status
                                 result["response"] = type('obj', (object,), {
-                                    'status_code': 200,
+                                    'status_code': js_status,
                                     'headers': {'Content-Type': 'text/html'},
                                     'content': html.encode(),
                                     'text': html
                                 })
+                            else:
+                                reason = f"JS render returned status {js_status}"
+                                self.failed_count += 1
+                                self.failure_reasons[reason] += 1
+                                self.log("error", f"Fetch failed after JS escalation for {url}: {reason}")
+                                continue
                         except Exception as js_err:
                             self.js_render_stats["failed"] += 1
                             self.log("error", f"JS Render escalation failed: {js_err}")
@@ -305,6 +330,7 @@ class CrawlerWorker(threading.Thread):
                     if not result["success"]:
                         self.failed_count += 1
                         reason = result.get("error", "Unknown Fetch Error")
+                        if initial_status == 404: reason = "http error: 404"
                         self.failure_reasons[reason] += 1
                         self.log("error", f"Fetch failed for {url}: {reason}")
                         continue
@@ -339,7 +365,7 @@ class CrawlerWorker(threading.Thread):
                     if not urls and JSIntelligence.needs_js_rendering(html):
                         self.js_render_stats["total"] += 1
                         try:
-                            html, final_url = JS_RENDERER.render(final_url)
+                            html, final_url, js_status = JS_RENDERER.render(final_url)
                             self.js_render_stats["success"] += 1
                             urls, _ = LinkExtractor.extract_urls(html, final_url)
                         except Exception as e:
