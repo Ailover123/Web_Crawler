@@ -241,154 +241,114 @@ class CrawlerWorker(threading.Thread):
 
     def run(self):
         self.log("info", f"started ({self.crawl_mode})")
+
+        # Initialize CompareEngine once per worker
+        compare_engine = None
+        if self.crawl_mode == "COMPARE":
+            compare_engine = CompareEngine(custid=self.custid)
+
         while self.running:
-            remaining = TrafficControl.get_remaining_pause(self.siteid)
-            if remaining > 0:
-                 time.sleep(remaining)
 
             item, found = self.frontier.dequeue()
             if not found:
-                # If no URLs and no active threads, we are done
-                if self.job_id and self.frontier.get_stats()["in_progress_count"] == 0:
+                if self.frontier.get_stats()["in_progress_count"] == 0:
                     break
-                time.sleep(1)
+                time.sleep(0.5)
                 continue
 
             url, discovered_from, depth = item
-            
-            # double check visited (race condition in queue)
-            if url in self.existed_urls:
-                self.frontier.mark_visited(url, got_task=True, preference_url=self.original_site_url)
-                continue
 
             try:
-                # -------------------------------
-                # 1. FETCH
-                # -------------------------------
-                
-                # Check 429 backoff again accurately before fetch
-                remaining = TrafficControl.get_remaining_pause(self.siteid)
-                if remaining > 0:
-                     time.sleep(remaining)
-
-                if CRAWL_DELAY > 0:
-                    time.sleep(CRAWL_DELAY)
-
+                # -------------------------
+                # FETCH
+                # -------------------------
                 fetch_url = LinkUtility.force_www_url(url)
                 result = PageFetcher.fetch(fetch_url, siteid=self.siteid, referer=discovered_from)
-                
-                if result.get("error") and any(err in str(result["error"]) for err in ("429", "503")):
-                    self.failed_throttle_count += 1
-                
-                if not result["success"]:
-                    # Handle soft redirects on 404/ignored
-                    if result.get("html") and self.is_soft_redirect(result["html"]):
-                        self.log("info", f"Soft Redirect detected for {url}. Escalating to JS Rendering...")
-                        self.js_render_stats["total"] += 1
-                        try:
-                            html, final_url = JS_RENDERER.render(url)
-                            self.js_render_stats["success"] += 1
-                            if final_url:
-                                result["success"] = True
-                                result["final_url"] = final_url
-                                # Fake a successful response object
-                                result["response"] = type('obj', (object,), {
-                                    'status_code': 200,
-                                    'headers': {'Content-Type': 'text/html'},
-                                    'content': html.encode(),
-                                    'text': html
-                                })
-                        except Exception as js_err:
-                            self.js_render_stats["failed"] += 1
-                            self.log("error", f"JS Render escalation failed: {js_err}")
 
-                    if not result["success"]:
-                        self.failed_count += 1
-                        reason = result.get("error", "Unknown Fetch Error")
-                        self.failure_reasons[reason] += 1
-                        self.log("error", f"Fetch failed for {url}: {reason}")
-                        continue
+                if not result["success"]:
+                    self.failed_count += 1
+                    self.log("error", f"Fetch failed for {url}: {result.get('error')}")
+                    continue
 
                 resp = result["response"]
                 final_url = result.get("final_url", url)
-                if final_url != url:
-                    self.redirect_count += 1
-                    self.log("info", f"[REDIRECT] {url} -> {final_url}")
-                
-                db_res = insert_crawl_page({
-                    "job_id": self.job_id, "custid": self.custid, "siteid": self.siteid,
-                    "url": self._db_url(final_url), "parent_url": self._db_url(discovered_from) if discovered_from else None,
-                    "depth": depth, "status_code": resp.status_code, "content_type": resp.headers.get("Content-Type", ""),
-                    "content_length": len(resp.content), "response_time_ms": result["fetch_time_ms"],
-                    "fetched_at": datetime.now(), "base_url": self.original_site_url
-                })
-                if db_res:
-                    action = db_res.get("action")
-                    affected_id = db_res.get("id", "?")
-                    if action == "Inserted":
-                        self.saved_count += 1
-                        self.new_urls.append(final_url)
-                        self.log("info", f"DB: Inserted {final_url} (ID: {affected_id})")
-                    elif action == "Existed":
-                        self.existed_urls.add(final_url)
-                        self.log("info", f"DB: Existed (Not-Touched) {final_url} (ID: {affected_id})")
 
-                html = resp.content.decode('utf-8', errors='ignore')
-                if not self.target_urls:
+                html = resp.content.decode("utf-8", errors="ignore")
+
+                # ======================================================
+                # MODE: CRAWL
+                # ======================================================
+                if self.crawl_mode == "CRAWL":
+
+                    # Insert into crawl_pages
+                    insert_crawl_page({
+                        "job_id": self.job_id,
+                        "custid": self.custid,
+                        "siteid": self.siteid,
+                        "url": self._db_url(final_url),
+                        "parent_url": self._db_url(discovered_from) if discovered_from else None,
+                        "depth": depth,
+                        "status_code": resp.status_code,
+                        "content_type": resp.headers.get("Content-Type", ""),
+                        "content_length": len(resp.content),
+                        "response_time_ms": result["fetch_time_ms"],
+                        "fetched_at": datetime.now(),
+                        "base_url": self.original_site_url
+                    })
+
+                    # Extract + enqueue
                     urls, _ = LinkExtractor.extract_urls(html, final_url)
-                    if not urls and JSIntelligence.needs_js_rendering(html):
-                        self.js_render_stats["total"] += 1
-                        try:
-                            html, final_url = JS_RENDERER.render(final_url)
-                            self.js_render_stats["success"] += 1
-                            urls, _ = LinkExtractor.extract_urls(html, final_url)
-                        except Exception as e:
-                            self.js_render_stats["failed"] += 1
-                            self.log("error", f"JS Render failed: {e}")
 
-                    if urls:
-                        self.log("info", f"Enqueued {len(urls)} URLs")
-                    
-                    policy_skipped = 0
-                    domain_skipped = 0
-                    
                     for u in urls:
-                        reason = ExecutionPolicy.classify_skip(u)
-                        if reason:
-                            policy_skipped += 1
-                            self.policy_skipped_count += 1
-                            with (self.skip_lock or threading.Lock()):
-                                self.skip_report[reason]["count"] += 1
-                                if len(self.skip_report[reason]["urls"]) < 100:
-                                    self.skip_report[reason]["urls"].append(u)
-                            continue
-                            
                         if not ExecutionPolicy.is_allowed_domain(self.original_site_url, u, current_url=final_url):
-                            domain_skipped += 1
-                            self.policy_skipped_count += 1
-                            with (self.skip_lock or threading.Lock()):
-                                self.skip_report["OUT_OF_DOMAIN"]["count"] += 1
                             continue
-                            
-                        if not self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.original_site_url):
-                            self.frontier_duplicate_count += 1
+                        self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.original_site_url)
 
-                    if urls:
-                        self.log("info", f"Skipped: rules={policy_skipped}, domain={domain_skipped}")
+                    continue  # Done for CRAWL
 
+                # ======================================================
+                # MODE: BASELINE
+                # ======================================================
                 if self.crawl_mode == "BASELINE":
-                    b_id, b_path, b_action = save_baseline(custid=self.custid, siteid=self.siteid, url=self._db_url(url), html=html, base_url=self.seed_url)
-                    self.log("info", f"DB: {b_action.upper()} baseline {b_id}")
-                elif self.crawl_mode == "COMPARE":
-                    engine = CompareEngine(custid=self.custid)
-                    res = engine.handle_page(siteid=self.siteid, url=self._db_url(url), html=html)
-                    if res and self.compare_results is not None:
-                        with (self.compare_lock or threading.Lock()): self.compare_results.extend(res)
+
+                    baseline_id, baseline_path, action = save_baseline(
+                        custid=self.custid,
+                        siteid=self.siteid,
+                        url=self._db_url(final_url),
+                        html=html,
+                      base_url=self.original_site_url
+                    )
+
+                    self.log("info", f"[BASELINE] {action.upper()} {baseline_id}")
+                    continue  # STOP here
+
+                # ======================================================
+                # MODE: COMPARE
+                # ======================================================
+                if self.crawl_mode == "COMPARE":
+
+                    results = compare_engine.handle_page(
+                        siteid=self.siteid,
+                        url=self._db_url(final_url),
+                        html=html,
+                        base_url=self.original_site_url
+                    )
+
+                    if results:
+                        for r in results:
+                            self.log(
+                                "warning" if r["status"] == "CHANGED" else "info",
+                                f"[COMPARE] {r['status']} | {r['url']} | Score={r['score']} | Severity={r['severity']}"
+                            )
+
+                    continue  # STOP here
 
             except Exception as e:
                 self.log("error", f"Process error for {url}: {e}")
-            finally:
-                self.frontier.mark_visited(url, got_task=found, preference_url=self.original_site_url)
 
-    def stop(self):
-        self.running = False
+            finally:
+                self.frontier.mark_visited(
+                    url,
+                    got_task=found,
+                    preference_url=self.original_site_url
+                )

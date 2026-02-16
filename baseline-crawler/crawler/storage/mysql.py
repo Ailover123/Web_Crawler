@@ -354,38 +354,30 @@ def insert_crawl_page(data):
         DB_SEMAPHORE.release()
 
 
-def insert_defacement_site(siteid, baseline_id, url, base_url=None):
-    canonical_url = LinkUtility.get_canonical_id(url, base_url)
-    if not canonical_url:
-        return
+def insert_defacement_site(siteid, baseline_id, url):
+    canonical_url = url  # Already canonical
 
     conn = get_connection()
     try:
         cur = conn.cursor(buffered=True)
-        
-        # 1. Manual Existence Check (Code-level duplicate prevention)
+
         cur.execute(
-            "SELECT id FROM defacement_sites WHERE siteid = %s AND url = %s",
+            "SELECT id FROM defacement_sites WHERE siteid=%s AND url=%s",
             (siteid, canonical_url)
         )
         row = cur.fetchone()
-        try:
-             cur.fetchall()
-        except:
-             pass
-        
+
         if row:
-            # 2. UPDATE existing record
             cur.execute(
                 """
-                UPDATE defacement_sites 
-                SET baseline_id = %s, action = 'selected'
+                UPDATE defacement_sites
+                SET baseline_id = %s,
+                    action = 'selected'
                 WHERE id = %s
                 """,
                 (baseline_id, row[0])
             )
         else:
-            # 3. INSERT new record
             cur.execute(
                 """
                 INSERT INTO defacement_sites (siteid, baseline_id, url, action)
@@ -393,163 +385,84 @@ def insert_defacement_site(siteid, baseline_id, url, base_url=None):
                 """,
                 (siteid, baseline_id, canonical_url),
             )
-            
+
         conn.commit()
+
     finally:
         cur.close()
         conn.close()
         DB_SEMAPHORE.release()
 
 
-# ============================================================
-# BASELINE HASH HELPERS (IMMUTABLE)
-# ============================================================
-
-# Cache schema checks to avoid repeated queries
-_SCHEMA_CACHE = {}
-_SCHEMA_LOCK = threading.Lock()
-
-def _has_column(table_name, column_name):
-    """Check if a column exists in a table (cached per process)."""
-    cache_key = f"{table_name}.{column_name}"
-    
-    with _SCHEMA_LOCK:
-        if cache_key in _SCHEMA_CACHE:
-            return _SCHEMA_CACHE[cache_key]
-    
-    # Not cached yet - check database
-    conn = get_connection()
-    try:
-        cur = conn.cursor(buffered=True)
-        cur.execute(
-            """
-            SELECT COUNT(*)
-            FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = %s
-              AND COLUMN_NAME = %s
-            """,
-            (table_name, column_name)
-        )
-        result = cur.fetchone()
-        try:
-             cur.fetchall()
-        except:
-             pass
-        
-        has_it = result is not None and result[0] > 0
-        
-        with _SCHEMA_LOCK:
-            _SCHEMA_CACHE[cache_key] = has_it
-        
-        return has_it
-    finally:
-        cur.close()
-        conn.close()
-        DB_SEMAPHORE.release()
-
-def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, baseline_id=None, base_url=None):
+def upsert_baseline_hash(site_id, normalized_url, content_hash, baseline_path, baseline_id=None):
     """
     Insert or UPDATE baseline for a URL into defacement_sites.
-    Manually checks for existence to handle cases where DB Unique Constraints might be missing.
+    No branding. No base_url. Deterministic.
     """
-    canonical_url = LinkUtility.get_canonical_id(normalized_url, base_url)
-    if not canonical_url:
-        return False
-
-    # Check once per process whether updated_at column exists
-    has_updated_at = _has_column('defacement_sites', 'updated_at')
+    canonical_url = normalized_url  # Already canonical
 
     conn = get_connection()
     try:
         cur = conn.cursor(buffered=True)
-        
-        # Check if record exists
+
         cur.execute(
             "SELECT id FROM defacement_sites WHERE siteid=%s AND url=%s",
             (site_id, canonical_url)
         )
         row = cur.fetchone()
-        try:
-            cur.fetchall()
-        except Exception:
-            pass
-        
+
         if row:
-            if has_updated_at:
-                cur.execute(
-                    """
-                    UPDATE defacement_sites
-                    SET content_hash = %s,
-                        baseline_path = %s,
-                        baseline_id = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                    """,
-                    (content_hash, baseline_path, baseline_id, row[0]),
-                )
-            else:
-                cur.execute(
-                    """
-                    UPDATE defacement_sites
-                    SET content_hash = %s,
-                        baseline_path = %s,
-                        baseline_id = %s
-                    WHERE id = %s
-                    """,
-                    (content_hash, baseline_path, baseline_id, row[0]),
-                )
+            cur.execute(
+                """
+                UPDATE defacement_sites
+                SET content_hash = %s,
+                    baseline_path = %s,
+                    baseline_id = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (content_hash, baseline_path, baseline_id, row[0]),
+            )
         else:
-            if has_updated_at:
-                cur.execute(
-                    """
-                    INSERT INTO defacement_sites
-                        (siteid, url, content_hash, baseline_path, baseline_id, action, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, 'selected', CURRENT_TIMESTAMP)
-                    """,
-                    (site_id, canonical_url, content_hash, baseline_path, baseline_id),
-                )
-            else:
-                cur.execute(
-                    """
-                    INSERT INTO defacement_sites
-                        (siteid, url, content_hash, baseline_path, baseline_id, action)
-                    VALUES (%s, %s, %s, %s, %s, 'selected')
-                    """,
-                    (site_id, canonical_url, content_hash, baseline_path, baseline_id),
-                )
-            
+            cur.execute(
+                """
+                INSERT INTO defacement_sites
+                    (siteid, url, content_hash, baseline_path, baseline_id, action, updated_at)
+                VALUES (%s, %s, %s, %s, %s, 'selected', CURRENT_TIMESTAMP)
+                """,
+                (site_id, canonical_url, content_hash, baseline_path, baseline_id),
+            )
+
         conn.commit()
         return True
+
     finally:
         cur.close()
         conn.close()
         DB_SEMAPHORE.release()
 
-def fetch_baseline_hash(site_id, normalized_url, base_url=None):
+
+def fetch_baseline_hash(site_id, normalized_url):
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True, buffered=True)
-        # Use canonical "Domain/Path" for lookup
-        canonical_url = LinkUtility.get_canonical_id(normalized_url, base_url)
+
         cur.execute(
             """
             SELECT content_hash, baseline_path
             FROM defacement_sites
             WHERE siteid=%s AND url=%s AND content_hash IS NOT NULL
             """,
-            (site_id, canonical_url),
+            (site_id, normalized_url),
         )
-        row = cur.fetchone()
-        try:
-             cur.fetchall()
-        except:
-             pass
-        return row
+
+        return cur.fetchone()
+
     finally:
         cur.close()
         conn.close()
         DB_SEMAPHORE.release()
+
 
 
 def site_has_baselines(site_id):
@@ -621,27 +534,12 @@ def insert_observed_page(
     diff_path=None,
     defacement_score=None,
     defacement_severity=None,
-    base_url=None,
 ):
-    canonical_url = LinkUtility.get_canonical_id(normalized_url, base_url)
-    if not canonical_url:
-        return
+    canonical_url = normalized_url  # Already canonical
 
     conn = get_connection()
     try:
         cur = conn.cursor()
-        
-        # 1. 🔍 Optimization: Check if current DB hash matches observed hash to avoid redundant write
-        cur.execute(
-            "SELECT observed_hash FROM observed_pages WHERE site_id=%s AND normalized_url=%s",
-            (site_id, canonical_url)
-        )
-        row = cur.fetchone()
-        
-        if row and row[0] == observed_hash:
-            # Hash unchanged - SKIP write
-            # (If we wanted to update 'checked_at', we would do a small UPDATE here, but user asked to avoid inserts)
-            return
 
         cur.execute(
             """
@@ -669,12 +567,14 @@ def insert_observed_page(
                 defacement_severity,
             ),
         )
+
         conn.commit()
-        conn.commit()
+
     finally:
         cur.close()
         conn.close()
         DB_SEMAPHORE.release()
+
 
 
 def fetch_observed_page(site_id, normalized_url):
@@ -711,9 +611,10 @@ def get_selected_defacement_rows():
         cur = conn.cursor(dictionary=True)
         cur.execute(
             """
-            SELECT siteid, url, baseline_id, threshold
-            FROM defacement_sites
-            WHERE action = 'selected'
+            SELECT d.siteid, d.url, d.baseline_id, d.threshold, s.url as base_url
+            FROM defacement_sites d
+            JOIN sites s ON d.siteid = s.siteid
+            WHERE d.action = 'selected'
             """
         )
         return cur.fetchall()

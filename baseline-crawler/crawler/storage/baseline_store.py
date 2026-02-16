@@ -20,22 +20,17 @@ _SITE_MAX_IDS = {}
 _SITE_HAS_BASELINES = {}
 
 
-def _next_baseline_id(site_dir: Path, siteid: int, *, force_reset: bool = False, reuse_if_orphaned: bool = False) -> str:
-    """
-    Thread-safe generation of the next baseline ID.
-    Uses an in-memory cache to avoid O(N) disk scans on every write.
-    """
+# --------------------------------------------------
+# ID GENERATOR (UNCHANGED LOGIC, STABLE)
+# --------------------------------------------------
+def _next_baseline_id(site_dir: Path, siteid: int) -> str:
     with _ID_LOCK:
-        if force_reset:
-            _SITE_MAX_IDS.pop(siteid, None)
 
         if siteid not in _SITE_MAX_IDS:
             max_seq = 0
             prefix = f"{siteid}-"
-            
-            # If we are strictly overwriting (first run or reset), we start from 0
-            # AND we tolerate if files exist (we claim the IDs sequentially).
-            if not force_reset and not reuse_if_orphaned and site_dir.exists():
+
+            if site_dir.exists():
                 for f in site_dir.glob(f"{siteid}-*.html"):
                     try:
                         stem = f.stem
@@ -45,21 +40,28 @@ def _next_baseline_id(site_dir: Path, siteid: int, *, force_reset: bool = False,
                                 max_seq = num
                     except ValueError:
                         pass
-            
+
             _SITE_MAX_IDS[siteid] = max_seq
 
         _SITE_MAX_IDS[siteid] += 1
         return f"{siteid}-{_SITE_MAX_IDS[siteid]}"
 
 
-def save_baseline(*, custid, siteid, url, html, base_url=None):
+# --------------------------------------------------
+# FINAL STABLE BASELINE SAVE
+# --------------------------------------------------
+def save_baseline(*, custid, siteid, url, html):
     """
-    Creates or UPDATES baseline for a URL.
-    - Reuses existing baseline_id if present
-    - Creates a new baseline_id only once per URL
+    Stable baseline logic:
+
+    - Canonicalize ONCE (no base_url)
+    - Remove www for DB storage
+    - Never re-canonicalize DB rows later
+    - Update existing baseline if present
     """
 
-    normalized_url = LinkUtility.normalize_url(url, preference_url=base_url)
+    # 🔒 Canonical for DB (NO WWW)
+    canonical = LinkUtility.get_canonical_id(url)
 
     content_hash = ContentNormalizer.semantic_hash(html)
 
@@ -67,58 +69,53 @@ def save_baseline(*, custid, siteid, url, html, base_url=None):
     site_dir.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------
-    # 1️⃣ Check if baseline already exists for this URL
+    # 1️⃣ Check existing baseline (NO base_url)
     # --------------------------------------------------
     existing = fetch_baseline_hash(
         site_id=siteid,
-        normalized_url=normalized_url,
-        base_url=base_url,
+        normalized_url=canonical
     )
 
     if siteid not in _SITE_HAS_BASELINES:
         _SITE_HAS_BASELINES[siteid] = site_has_baselines(siteid)
 
     if existing and existing.get("baseline_path"):
-        # 🔁 UPDATE EXISTING BASELINE
         baseline_id = Path(existing["baseline_path"]).stem
         action = "updated"
     else:
-        # 🆕 CREATE NEW BASELINE ID ONCE
-        # If this is the FIRST baseline for this site in this run/context (reset_sequence=True),
-        # we allow overwriting files 1, 2, 3... treating them as 'orphaned' if DB doesn't know them.
-        reset_sequence = not _SITE_HAS_BASELINES.get(siteid, False)
-        
-        baseline_id = _next_baseline_id(
-            site_dir,
-            siteid,
-            force_reset=reset_sequence,
-            reuse_if_orphaned=reset_sequence, 
-        )
+        baseline_id = _next_baseline_id(site_dir, siteid)
         action = "created"
         _SITE_HAS_BASELINES[siteid] = True
 
     path = site_dir / f"{baseline_id}.html"
 
     logger.info(
-        f"[BASELINE] {action.upper()} baseline "
-        f"id={baseline_id} for url={url}"
+        f"[BASELINE] {action.upper()} id={baseline_id} url={canonical}"
     )
 
     # --------------------------------------------------
-    # 2️⃣ UPSERT baseline record
+    # 2️⃣ UPSERT DB (NO base_url, NO branding logic)
     # --------------------------------------------------
     upsert_baseline_hash(
         site_id=siteid,
-        normalized_url=normalized_url,
+        normalized_url=canonical,
         content_hash=content_hash,
         baseline_path=str(path),
         baseline_id=baseline_id,
-        base_url=base_url,
     )
 
     # --------------------------------------------------
-    # 3️⃣ Overwrite the SAME file every time
+    # 3️⃣ Always overwrite file
     # --------------------------------------------------
     path.write_text(html.strip(), encoding="utf-8")
+
+    # --------------------------------------------------
+    # 4️⃣ Ensure defacement_sites stores canonical only
+    # --------------------------------------------------
+    insert_defacement_site(
+        siteid=siteid,
+        baseline_id=baseline_id,
+        url=canonical,   #  STORE WITHOUT WWW
+    )
 
     return baseline_id, str(path), action

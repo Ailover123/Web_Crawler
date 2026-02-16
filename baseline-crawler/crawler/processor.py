@@ -19,61 +19,140 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # === LINK UTILITY ===
 
 class LinkUtility:
-    """
-    FLOW: Handles URL string manipulation -> Normalizes schemes and domains -> 
-    Provides canonical identifiers for DB indexing -> Logic merged from normalizer.py and url_utils.py.
-    """
+
+    # -------------------------------
+    # NETWORK NORMALIZATION (FETCH)
+    # -------------------------------
+    @staticmethod
+    def normalize_url_for_fetch(url: str) -> str:
+        if not url:
+            return ""
+
+        if "://" not in url:
+            url = "https://" + url
+
+        parsed = urlparse(url)
+
+        netloc = parsed.netloc.lower()
+
+        # ✅ Always use www for network
+        if not netloc.startswith("www."):
+            netloc = "www." + netloc
+
+        path = parsed.path or ""
+        path = path.rstrip("/")
+
+        query = parsed.query
+
+        return urlunparse((
+            "https",
+            netloc,
+            path,
+            "",
+            query,
+            ""
+        ))
+
+    # -------------------------------
+    # STORAGE CANONICAL (DB)
+    # -------------------------------
+    @staticmethod
+    def get_canonical_id(url: str) -> str:
+        if not url:
+            return ""
+
+        if "://" not in url:
+            url = "https://" + url
+
+        parsed = urlparse(url)
+
+        netloc = parsed.netloc.lower()
+
+        # ✅ REMOVE www permanently for DB
+        if netloc.startswith("www."):
+            netloc = netloc[4:]
+
+        path = parsed.path or ""
+        path = path.rstrip("/")
+
+        query = f"?{parsed.query}" if parsed.query else ""
+
+        if not path:
+            return netloc
+
+        return f"{netloc}{path}{query}"
+    
     @staticmethod
     def normalize_url(url: str, *, base: str | None = None, preference_url: str | None = None) -> str:
-        if not url: return ""
+        """
+        Normalization for FETCHING (network safe).
+        Does NOT affect DB identity.
+        """
+
+        if not url:
+            return ""
+
         url = url.strip()
-        if "://" not in url and not url.startswith("/"): url = "http://" + url
-        if base: url = urljoin(base, url)
+
+        if "://" not in url and not url.startswith("/"):
+            url = "https://" + url
+
+        if base:
+            url = urljoin(base, url)
+
         parsed = urlparse(url)
-        scheme = parsed.scheme or "https"
+
+        scheme = "https"   # Force https for crawling
         netloc = parsed.netloc.lower()
-        path = parsed.path if parsed.path else "/"
-        # Strip trailing slash to avoid duplicate fetches
+
+        # Apply branding preference (fetch-only logic)
+        if preference_url:
+            if "://" not in preference_url:
+                preference_url = "https://" + preference_url
+
+            pref_netloc = urlparse(preference_url).netloc.lower()
+
+            if netloc.replace("www.", "") == pref_netloc.replace("www.", ""):
+                netloc = pref_netloc
+
+        path = parsed.path or "/"
         path = path.rstrip("/")
-        if not path: path = "/"
+        if not path:
+            path = "/"
+
         query = parsed.query
+
         return urlunparse((scheme, netloc, path, "", query, ""))
 
     @staticmethod
-    def get_canonical_id(url: str, base_url: str | None = None) -> str:
-        if not url: return ""
-        url = LinkUtility.normalize_url(url, preference_url=base_url)
+    def force_www_url(url: str) -> str:
+        """
+        Fetch-only helper.
+        Forces www prefix for crawling.
+        Does NOT affect DB canonicalization.
+        """
+
+        if not url:
+            return ""
+
         parsed = urlparse(url)
         netloc = parsed.netloc.lower()
-        if base_url:
-            base_parsed = urlparse(base_url if "://" in base_url else "https://" + base_url)
-            base_netloc = base_parsed.netloc.lower()
-            pref_has_www = base_netloc.startswith("www.")
-            clean_netloc = netloc[4:] if netloc.startswith("www.") else netloc
-            clean_base = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc
-            if clean_netloc == clean_base:
-                if pref_has_www and not netloc.startswith("www."): netloc = "www." + netloc
-                elif not pref_has_www and netloc.startswith("www."): netloc = netloc[4:]
-        path = parsed.path
-        query = f"?{parsed.query}" if parsed.query else ""
-        return f"{netloc}{path}{query}" if path and path != "/" else f"{netloc}{query}"
 
-    @staticmethod
-    def canonicalize_seed(url: str) -> str:
-        p = urlparse(url)
-        path = p.path.rstrip("/")
-        return urlunparse((p.scheme, p.netloc, path, "", "", ""))
+        # Already has www
+        if netloc.startswith("www."):
+            return url
 
-    @staticmethod
-    def force_www_url(url: str) -> str:
-        if not url: return ""
-        ext = tldextract.extract(url)
-        if not ext.subdomain and ext.domain and ext.suffix:
-            p = urlparse(url)
-            netloc = p.netloc.lower()
-            port = f":{netloc.split(':', 1)[1]}" if ":" in netloc else ""
-            return urlunparse((p.scheme, f"www.{ext.domain}.{ext.suffix}{port}", p.path, p.params, p.query, p.fragment))
-        return url
+        # Add www
+        new_netloc = f"www.{netloc}"
+
+        return urlunparse((
+            parsed.scheme,
+            new_netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
 
 
 # === TRAFFIC CONTROL ===
@@ -136,7 +215,7 @@ class PageFetcher:
                 logger.info(f"[THROTTLE] Pre-fetch pause active for site {siteid}. Waiting {remaining:.1f}s...")
                 time.sleep(remaining)
 
-        max_retries = 3
+        max_retries = 2
         retry_delay = 5
         headers = {
             "User-Agent": USER_AGENT,
@@ -171,7 +250,7 @@ class PageFetcher:
                         logger.warning(f"[RETRY {attempt+1}/{max_retries}] {r.status_code} Error for {url}. Waiting locally for {retry_delay}s...")
                         time.sleep(retry_delay)
                         retry_delay *= 2
-                        logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
+                        logger.info(f"Retrying {url} now (Attempt {attempt+1}/{max_retries+1})...")
                         continue
                     else:
                         logger.error(f"{r.status_code} Error persisted for {url} after {max_retries} retries. Final 5s pause.")
@@ -209,7 +288,7 @@ class PageFetcher:
                     logger.warning(f"[RETRY {attempt+1}/{max_retries}] {err_type} for {url}: {e}. Waiting {retry_delay}s...")
                     time.sleep(retry_delay)
                     retry_delay *= 2
-                    logger.info(f"Retrying {url} now (Attempt {attempt+2}/{max_retries+1})...")
+                    logger.info(f"Retrying {url} now (Attempt {attempt+1}/{max_retries+1})...")
                     continue
                 return {"success": False, "error": str(e), "content_type": "", "fetch_time_ms": int((time.time() - start_time) * 1000)}
 
