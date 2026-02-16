@@ -229,56 +229,232 @@ def crawl_site(site, args, target_urls=None):
             return
 
         # ====================================================
-        # CRAWL / COMPARE MODE (LIVE DISCOVERY)
+        # CRAWL MODE (LIVE DISCOVERY)
         # ====================================================
-        if CRAWL_MODE == "COMPARE":
+        if CRAWL_MODE == "CRAWL":
+            job_logger.info(f"[MODE] CRAWL (live discovery for siteid={siteid})")
+
+            # 🛡️ Capture initial state for "NEW LINK FOUND" logic
+            initial_has_data = has_site_crawl_data(siteid, start_url)
+
+            # 🛡️ Seed Skip Check
+            skip_reason = ExecutionPolicy.classify_skip(start_url)
+            if skip_reason:
+                 job_logger.warning(f"Seed URL {start_url} skipped by rule: {skip_reason}")
+                 return
+
+            frontier = Frontier()
+            
+            if target_urls:
+                 for t_url in target_urls:
+                     frontier.enqueue(t_url, None, 0, preference_url=original_site_url)
+                 job_logger.info(f"Targeting {len(target_urls)} specific URL(s). Site walking disabled.")
+            else:
+                 frontier.enqueue(start_url, None, 0, preference_url=original_site_url)
+
+            siteid_map = {siteid: siteid}
+            workers = []
+            retired_workers = []
+            try:
+                for i in range(MIN_WORKERS):
+                    w = CrawlerWorker(
+                        frontier=frontier, name=f"Worker-{siteid}-{i}",
+                        custid=custid, siteid_map=siteid_map, job_id=job_id,
+                        crawl_mode="CRAWL", seed_url=start_url, 
+                        original_site_url=original_site_url,
+                        skip_report=site_skip_report, skip_lock=site_skip_lock,
+                        target_urls=target_urls
+                    )
+                    w.start()
+                    workers.append(w)
+
+                job_logger.info(f"Started {len(workers)} workers for site {siteid}.")
+                
+                while True:
+                    time.sleep(5)
+                    qsize = frontier.queue.qsize()
+                    unfinished = frontier.queue.unfinished_tasks
+                    if qsize == 0 and unfinished == 0: break
+                    
+                    if TrafficControl.should_scale_down(siteid) and len(workers) > MIN_WORKERS:
+                        num_to_stop = len(workers) - MIN_WORKERS
+                        job_logger.warning(f"[Site {siteid}] 429 hit! Scaling down {num_to_stop} workers.")
+                        for _ in range(num_to_stop):
+                            if len(workers) > MIN_WORKERS:
+                                w = workers.pop()
+                                w.stop()
+                                retired_workers.append(w)
+                        TrafficControl.reset_scale_down(siteid)
+                    
+                    if qsize > 100 and len(workers) < MAX_WORKERS:
+                        scale_count = min(5, MAX_WORKERS - len(workers))
+                        for i in range(scale_count):
+                            w = CrawlerWorker(
+                                frontier=frontier, name=f"Worker-{siteid}-{len(workers)}",
+                                custid=custid, siteid_map=siteid_map, job_id=job_id,
+                                crawl_mode="CRAWL", seed_url=start_url, 
+                                original_site_url=original_site_url,
+                                skip_report=site_skip_report, skip_lock=site_skip_lock,
+                                target_urls=target_urls
+                            )
+                            w.start()
+                            workers.append(w)
+                        job_logger.info(f"[Site {siteid}] Scaled up to {len(workers)} workers (Queue: {qsize})")
+
+                    if unfinished == 0: break
+                    LAST_ACTIVITY_TIME = time.time()
+                        
+            finally:
+                all_active_workers = workers + retired_workers
+                job_logger.info(f"Stopping {len(all_active_workers)} workers for site {siteid}...")
+                for w in all_active_workers: w.stop()
+                
+                start_join = time.time()
+                for w in all_active_workers:
+                    if w.is_alive():
+                        while w.is_alive():
+                            w.join(timeout=2)
+                            LAST_ACTIVITY_TIME = time.time()
+                            if time.time() - start_join > 15: break
+                
+                TrafficControl.set_pause(siteid, 0)
+                TrafficControl.reset_scale_down(siteid)
+                job_logger.info(f"All workers for site {siteid} stopped.")
+
+            duration = time.time() - start_time
+            stats = frontier.get_stats()
+            complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
+
+            total_saved = sum(getattr(w, 'saved_count', 0) for w in all_active_workers)
+            total_failed = sum(getattr(w, 'failed_count', 0) for w in all_active_workers)
+            total_policy_skipped = sum(getattr(w, 'policy_skipped_count', 0) for w in all_active_workers)
+            total_frontier_skips = sum(getattr(w, 'frontier_duplicate_count', 0) for w in all_active_workers)
+            total_skipped_rules = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_skip_report.values())
+            
+            # 🛡️ Deduplicate "Existed" URLs per site session to match DB row count accurately
+            all_existed_urls = set()
+            for w in all_active_workers:
+                all_existed_urls.update(getattr(w, 'existed_urls', set()))
+            total_db_existed = len(all_existed_urls)
+
+            total_duplicates = total_db_existed + total_frontier_skips
+            total_visited = total_saved + total_duplicates + total_skipped_rules + total_failed + total_policy_skipped
+            
+            # Aggregating metrics from workers
+            total_redirects = sum(getattr(w, 'redirect_count', 0) for w in all_active_workers)
+            js_renders = {
+                "total": sum(getattr(w, 'js_render_stats', {}).get("total", 0) for w in all_active_workers),
+                "success": sum(getattr(w, 'js_render_stats', {}).get("success", 0) for w in all_active_workers),
+                "failed": sum(getattr(w, 'js_render_stats', {}).get("failed", 0) for w in all_active_workers)
+            }
+            combined_fails = defaultdict(int)
+            total_throttles = sum(getattr(w, 'failed_throttle_count', 0) for w in all_active_workers)
+            for w in all_active_workers:
+                for reason, count in getattr(w, 'failure_reasons', {}).items():
+                    combined_fails[reason] += count
+
+            # Collect session data early to be safe
+            all_new_urls = []
+            for w in all_active_workers:
+                all_new_urls.extend(getattr(w, 'new_urls', []))
+
+            session_entry = {
+                "custid": custid,
+                "siteid": siteid,
+                "url": original_site_url,
+                "total_attempted": total_visited,
+                "new_saved": total_saved,
+                "db_existed": total_db_existed,
+                "total_throttles": total_throttles,
+                "duration": duration,
+                "new_urls": all_new_urls,
+                "has_existing_data": initial_has_data, 
+                "failure_reasons": dict(combined_fails),
+                "alerts": 0 
+            }
+
+            # ====================================================
+            # PERFORMANCE SUMMARY LOGGING
+            # ====================================================
+            fail_details = ", ".join([f"{k}: {v}" for k, v in combined_fails.items()]) if combined_fails else "None"
+            
+            summary_lines = [
+                f"\n" + "-" * 70,
+                f"SITE {siteid} PERFORMANCE SUMMARY (CRAWL)",
+                "-" * 70,
+                f"{'METRIC':<25} | {'COUNT':<7} | {'DETAILS'}",
+                "-" * 70,
+                f"{'Total URLs Attempted':<25} | {total_visited:<7} | (Sum of all attempts below)",
+                f"{'  - Newly Saved':<25} | {total_saved:<7} | (New pages added to DB)",
+                f"{'  - Already in DB':<25} | {total_db_existed:<7} | (Previously crawled/existed)",
+                f"{'  - Redirects':<25} | {total_redirects:<7} | (Found during discovery)",
+                f"{'  - SkipRules/Policy':<25} | {total_skipped_rules + total_policy_skipped:<7} | (Filtered out by config)",
+                f"{'  - Failures':<25} | {total_failed:<7} | (Network/Server errors)",
+                f"{'  - 429/503 Throttles':<25} | {total_throttles:<7} | (May be recovered)",
+                "-" * 70,
+                f"{'JS Rendering':<25} | {js_renders['total']:<7} | (Success: {js_renders['success']} | Failed: {js_renders['failed']})",
+                f"{'Failure Details':<25} | {total_failed:<7} | ({fail_details})",
+                "-" * 70 + "\n"
+            ]
+            
+            with SUMMARY_LOCK:
+                job_logger.info("\n".join(summary_lines))
+
+            with GLOBAL_LOCK:
+                GLOBAL_SESSIONS.append(session_entry)
+                GLOBAL_TOTAL_URLS += total_saved
+                GLOBAL_SUCCESS += total_saved
+                GLOBAL_THROTTLE_ERRORS += total_throttles
+                GLOBAL_OTHER_ERRORS += total_failed
+
+            with site_skip_lock:
+                for skip_type, data in site_skip_report.items():
+                    with SKIP_LOCK:
+                        SKIP_REPORT[skip_type]["count"] += data["count"]
+                        SKIP_REPORT[skip_type]["urls"].extend(data["urls"][:5])
+            return
+
+        # ====================================================
+        # COMPARE MODE (LIVE DISCOVERY + DIFFER)
+        # ====================================================
+        elif CRAWL_MODE == "COMPARE":
              # 🛡️ High-level check: Verify baselines exist in DB and FS
              has_db_data = site_has_baselines(siteid)
-             
              baseline_dir = Path("baselines") / str(custid) / str(siteid)
              has_fs_files = baseline_dir.exists() and any(baseline_dir.glob("*.html"))
              
-             if has_db_data and not has_fs_files:
-                  job_logger.error("files not present to compare")
-                  job_logger.info(f"Summary: Site {siteid} has baseline records in DB but the 'baselines' directory is missing or empty. Please run baseline mode first.")
+             if not (has_db_data and has_fs_files):
+                  job_logger.error(f"Site {siteid} has no baselines to compare against. Please run baseline mode first.")
                   return
              
-             if not has_db_data and has_fs_files:
-                  job_logger.error("no data inside db to compare")
-                  job_logger.info(f"Summary: Site {siteid} has files in 'baselines' directory but no records in DB. Please run baseline mode first.")
+             job_logger.info(f"[MODE] COMPARE (live discovery + diff for siteid={siteid})")
+
+             # 🛡️ Capture initial state for "NEW LINK FOUND" logic
+             initial_has_data = has_site_crawl_data(siteid, start_url)
+
+             # 🛡️ Seed Skip Check
+             skip_reason = ExecutionPolicy.classify_skip(start_url)
+             if skip_reason:
+                  job_logger.warning(f"Seed URL {start_url} skipped by rule: {skip_reason}")
                   return
+
+             frontier = Frontier()
              
-             if not has_db_data and not has_fs_files:
-                  job_logger.warning(f"Site {siteid} has no baselines to compare against. Please run baseline mode first.")
-                  return
-
-        # 🛡️ Capture initial state for "NEW LINK FOUND" logic
-        # In CRAWL mode, "existing data" means we have previously crawled this site.
-        initial_has_data = has_site_crawl_data(siteid, start_url)
-
-        # 🛡️ Seed Skip Check
-        skip_reason = ExecutionPolicy.classify_skip(start_url)
-        if skip_reason:
-             job_logger.warning(f"Seed URL {start_url} skipped by rule: {skip_reason}")
-             return
-
-        frontier = Frontier()
-        
-        if target_urls:
+             if target_urls:
              # Targeting specific pages only - do not seed the whole site
-             for t_url in target_urls:
-                 frontier.enqueue(t_url, None, 0, preference_url=original_site_url)
-             job_logger.info(f"Targeting {len(target_urls)} specific URL(s). Site walking disabled.")
-        else:
+                  for t_url in target_urls:
+                      frontier.enqueue(t_url, None, 0, preference_url=original_site_url)
+                  job_logger.info(f"Targeting {len(target_urls)} specific URL(s). Site walking disabled.")
+             else:
              # Default: Seed with start_url to crawl entire site
-             frontier.enqueue(start_url, None, 0, preference_url=original_site_url)
+                  frontier.enqueue(start_url, None, 0, preference_url=original_site_url)
 
-        siteid_map = {siteid: siteid}
-        workers = []
-        retired_workers = []
-        try:
-            for i in range(MIN_WORKERS):
-                w = CrawlerWorker(
+             siteid_map = {siteid: siteid}
+             workers = []
+             retired_workers = []
+             try:
+                 for i in range(MIN_WORKERS):
+                     w = CrawlerWorker(
                     frontier=frontier,
                     name=f"Worker-{siteid}-{i}",
                     custid=custid,
@@ -286,43 +462,38 @@ def crawl_site(site, args, target_urls=None):
                     job_id=job_id,
                     crawl_mode=CRAWL_MODE,
                     seed_url=start_url, 
-                    original_site_url=original_site_url,
-                    skip_report=site_skip_report,
-                    skip_lock=site_skip_lock,
-                    target_urls=target_urls,
-                    compare_results=GLOBAL_COMPARE_RESULTS,
-                    compare_lock=COMPARE_LOCK,
-                )
-                w.start()
-                workers.append(w)
+                         original_site_url=original_site_url,
+                         skip_report=site_skip_report, skip_lock=site_skip_lock,
+                         target_urls=target_urls,
+                         compare_results=GLOBAL_COMPARE_RESULTS, compare_lock=COMPARE_LOCK,
+                     )
+                     w.start()
+                     workers.append(w)
 
-            job_logger.info(f"Started {len(workers)} workers for site {siteid}.")
-            
+                 job_logger.info(f"Started {len(workers)} workers for site {siteid}.")
+                 
             # --- DYNAMIC SCALING LOOP ---
-            while True:
-                time.sleep(5)
-                
-                qsize = frontier.queue.qsize()
-                unfinished = frontier.queue.unfinished_tasks
-                
-                if qsize == 0 and unfinished == 0:
-                    break
-                
+                 while True:
+                     time.sleep(5)
+                     qsize = frontier.queue.qsize()
+                     unfinished = frontier.queue.unfinished_tasks
+                     if qsize == 0 and unfinished == 0: break
+                     
                 # --- ADAPTIVE SCALE DOWN ON 429 ---
-                if TrafficControl.should_scale_down(siteid) and len(workers) > MIN_WORKERS:
-                    num_to_stop = len(workers) - MIN_WORKERS
-                    job_logger.warning(f"[Site {siteid} - {original_site_url}] 429 hit! Scaling down {num_to_stop} workers to reach MIN_WORKERS ({MIN_WORKERS})")
-                    for _ in range(num_to_stop):
-                        if len(workers) > MIN_WORKERS:
-                            w = workers.pop()
-                            w.stop()
-                            retired_workers.append(w)
-                    TrafficControl.reset_scale_down(siteid)
-                
-                if qsize > 100 and len(workers) < MAX_WORKERS:
-                    scale_count = min(5, MAX_WORKERS - len(workers))
-                    for i in range(scale_count):
-                        w = CrawlerWorker(
+                     if TrafficControl.should_scale_down(siteid) and len(workers) > MIN_WORKERS:
+                         num_to_stop = len(workers) - MIN_WORKERS
+                         job_logger.warning(f"[Site {siteid}] 429 hit! Scaling down {num_to_stop} workers.")
+                         for _ in range(num_to_stop):
+                             if len(workers) > MIN_WORKERS:
+                                 w = workers.pop()
+                                 w.stop()
+                                 retired_workers.append(w)
+                         TrafficControl.reset_scale_down(siteid)
+                     
+                     if qsize > 100 and len(workers) < MAX_WORKERS:
+                         scale_count = min(5, MAX_WORKERS - len(workers))
+                         for i in range(scale_count):
+                             w = CrawlerWorker(
                             frontier=frontier,
                             name=f"Worker-{siteid}-{len(workers)}",
                             custid=custid,
@@ -330,110 +501,91 @@ def crawl_site(site, args, target_urls=None):
                             job_id=job_id,
                             crawl_mode=CRAWL_MODE,
                             seed_url=start_url, 
-                            original_site_url=original_site_url,
-                            skip_report=site_skip_report,
-                            skip_lock=site_skip_lock,
-                            target_urls=target_urls,
-                            compare_results=GLOBAL_COMPARE_RESULTS,
-                            compare_lock=COMPARE_LOCK,
-                        )
-                        w.start()
-                        workers.append(w)
-                    job_logger.info(f"[Site {siteid} - {original_site_url}] Dynamically scaled up to {len(workers)} workers (Queue: {qsize})")
+                                 original_site_url=original_site_url,
+                                 skip_report=site_skip_report, skip_lock=site_skip_lock,
+                                 target_urls=target_urls,
+                                 compare_results=GLOBAL_COMPARE_RESULTS, compare_lock=COMPARE_LOCK,
+                             )
+                             w.start()
+                             workers.append(w)
+                         job_logger.info(f"[Site {siteid}] Scaled up to {len(workers)} workers (Queue: {qsize})")
 
-                if unfinished == 0:
-                    break
-                
                 # HEARTBEAT: Keep watchdog happy while we are working
-                LAST_ACTIVITY_TIME = time.time()
-                    
-        finally:
+                     LAST_ACTIVITY_TIME = time.time()
+                         
+             finally:
             # 🛑 CRITICAL: Always signal workers to stop and wait for them
-            all_active_workers = workers + retired_workers
-            job_logger.info(f"Stopping {len(all_active_workers)} workers for site {siteid}...")
-            for w in all_active_workers:
-                w.stop()
-            
+                 all_active_workers = workers + retired_workers
+                 job_logger.info(f"Stopping {len(all_active_workers)} workers for site {siteid}...")
+                 for w in all_active_workers: w.stop()
+                 
             # Wait with a "Hang Alert" loop
-            start_join = time.time()
-            for w in all_active_workers:
-                if w.is_alive():
+                 start_join = time.time()
+                 for w in all_active_workers:
+                     if w.is_alive():
                     # Wait in small chunks to allow logging if it takes too long
-                    while w.is_alive():
-                        w.join(timeout=2)
+                         while w.is_alive():
+                             w.join(timeout=2)
                         
                         # HEARTBEAT during cleanup
-                        LAST_ACTIVITY_TIME = time.time()
+                             LAST_ACTIVITY_TIME = time.time()
 
-                        elapsed = time.time() - start_join
-                        if elapsed > 15:
-                             job_logger.warning(f"Thread {w.name} is taking exceptionally long to terminate ({elapsed:.1f}s). System may be hanging.")
-                             break # Don't block forever if it's truly stuck
+                             elapsed = time.time() - start_join
+                             if elapsed > 15:
+                                 job_logger.warning(f"Thread {w.name} is taking exceptionally long to terminate ({elapsed:.1f}s). System may be hanging.")
+                                 break # Don't block forever if it's truly stuck
             
             # Reset the Global Site Pause so fresh runs aren't blocked
-            TrafficControl.set_pause(siteid, 0)
-            TrafficControl.reset_scale_down(siteid)
-            
-            job_logger.info(f"All workers for site {siteid} stopped.")
-            # Match legacy: No 'COMPLETED' extra log here
-            pass
+                 TrafficControl.set_pause(siteid, 0)
+                 TrafficControl.reset_scale_down(siteid)
+                 job_logger.info(f"All workers for site {siteid} stopped.")
 
-        duration = time.time() - start_time
-        stats = frontier.get_stats()
-        complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
+             duration = time.time() - start_time
+             stats = frontier.get_stats()
+             complete_crawl_job(job_id=job_id, pages_crawled=stats["visited_count"])
 
-        total_saved = sum(getattr(w, 'saved_count', 0) for w in all_active_workers)
-        total_failed = sum(getattr(w, 'failed_count', 0) for w in all_active_workers)
-        total_policy_skipped = sum(getattr(w, 'policy_skipped_count', 0) for w in all_active_workers)
-        total_frontier_skips = sum(getattr(w, 'frontier_duplicate_count', 0) for w in all_active_workers)
-        total_skipped_rules = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_skip_report.values())
-        
+             total_saved = sum(getattr(w, 'saved_count', 0) for w in all_active_workers)
+             total_failed = sum(getattr(w, 'failed_count', 0) for w in all_active_workers)
+             total_policy_skipped = sum(getattr(w, 'policy_skipped_count', 0) for w in all_active_workers)
+             total_frontier_skips = sum(getattr(w, 'frontier_duplicate_count', 0) for w in all_active_workers)
+             total_skipped_rules = sum(data.get("count", 0) if isinstance(data, dict) else 0 for data in site_skip_report.values())
+             
         # 🛡️ Deduplicate "Existed" URLs per site session to match DB row count accurately
-        all_existed_urls = set()
-        for w in all_active_workers:
-            all_existed_urls.update(getattr(w, 'existed_urls', set()))
-        total_db_existed = len(all_existed_urls)
+             all_existed_urls = set()
+             for w in all_active_workers:
+                 all_existed_urls.update(getattr(w, 'existed_urls', set()))
+             total_db_existed = len(all_existed_urls)
 
-        total_duplicates = total_db_existed + total_frontier_skips
-        total_visited = total_saved + total_duplicates + total_skipped_rules + total_failed + total_policy_skipped
-        
+             total_visited = total_saved + total_db_existed + total_skipped_rules + total_failed + total_policy_skipped
+             
         # Aggregating metrics from workers
-        total_redirects = sum(getattr(w, 'redirect_count', 0) for w in all_active_workers)
-        js_renders = {
-            "total": sum(getattr(w, 'js_render_stats', {}).get("total", 0) for w in all_active_workers),
-            "success": sum(getattr(w, 'js_render_stats', {}).get("success", 0) for w in all_active_workers),
-            "failed": sum(getattr(w, 'js_render_stats', {}).get("failed", 0) for w in all_active_workers)
-        }
-        combined_fails = defaultdict(int)
-        total_throttles = sum(getattr(w, 'failed_throttle_count', 0) for w in all_active_workers)
-        for w in all_active_workers:
-            for reason, count in getattr(w, 'failure_reasons', {}).items():
-                combined_fails[reason] += count
+             total_redirects = sum(getattr(w, 'redirect_count', 0) for w in all_active_workers)
+             js_renders = {
+                 "total": sum(getattr(w, 'js_render_stats', {}).get("total", 0) for w in all_active_workers),
+                 "success": sum(getattr(w, 'js_render_stats', {}).get("success", 0) for w in all_active_workers),
+                 "failed": sum(getattr(w, 'js_render_stats', {}).get("failed", 0) for w in all_active_workers)
+             }
+             combined_fails = defaultdict(int)
+             total_throttles = sum(getattr(w, 'failed_throttle_count', 0) for w in all_active_workers)
+             for w in all_active_workers:
+                 for reason, count in getattr(w, 'failure_reasons', {}).items(): combined_fails[reason] += count
 
         # Collect session data early to be safe
-        all_new_urls = []
-        for w in all_active_workers:
-            all_new_urls.extend(getattr(w, 'new_urls', []))
+             all_new_urls = []
+             for w in all_active_workers: all_new_urls.extend(getattr(w, 'new_urls', []))
 
-        session_entry = {
-            "custid": custid,
-            "siteid": siteid,
-            "url": original_site_url,
-            "total_attempted": total_visited,
-            "new_saved": total_saved,
-            "db_existed": total_db_existed,
-            "total_throttles": total_throttles,
-            "duration": duration,
-            "new_urls": all_new_urls,
-            "has_existing_data": initial_has_data, 
-            "failure_reasons": dict(combined_fails),
-            "alerts": 0 
-        }
+             session_entry = {
+                 "custid": custid, "siteid": siteid, "url": original_site_url,
+                 "total_attempted": total_visited, "new_saved": total_saved,
+                 "db_existed": total_db_existed, "total_throttles": total_throttles,
+                 "duration": duration, "new_urls": all_new_urls,
+                 "has_existing_data": initial_has_data, 
+                 "failure_reasons": dict(combined_fails), "alerts": 0 
+             }
 
-        # 1. Performance Summary Table (Consolidated & Atomic)
-        fail_details = ", ".join([f"{k}: {v}" for k, v in combined_fails.items()]) if combined_fails else "None"
-        
-        summary_lines = [
+             # Reporting
+             fail_details = ", ".join([f"{k}: {v}" for k, v in combined_fails.items()]) if combined_fails else "None"
+             summary_lines = [
             f"\n" + "-" * 70,
             f"SITE {siteid} PERFORMANCE SUMMARY",
             "-" * 70,
@@ -449,27 +601,23 @@ def crawl_site(site, args, target_urls=None):
             "-" * 70,
             f"{'JS Rendering':<25} | {js_renders['total']:<7} | (Success: {js_renders['success']} | Failed: {js_renders['failed']})",
             f"{'Failure Details':<25} | {total_failed:<7} | ({fail_details})",
-            "-" * 70 + "\n"
-        ]
-        
-        with SUMMARY_LOCK:
-            job_logger.info("\n".join(summary_lines))
+                 "-" * 70 + "\n"
+             ]
+             with SUMMARY_LOCK: job_logger.info("\n".join(summary_lines))
 
-        with GLOBAL_LOCK:
-            GLOBAL_SESSIONS.append(session_entry)
-            if CRAWL_MODE == "COMPARE":
-                GLOBAL_TOTAL_URLS += (total_saved + total_db_existed)
-            else:
-                GLOBAL_TOTAL_URLS += total_saved
-            GLOBAL_SUCCESS += total_saved
-            GLOBAL_THROTTLE_ERRORS += total_throttles
-            GLOBAL_OTHER_ERRORS += total_failed
+             with GLOBAL_LOCK:
+                 GLOBAL_SESSIONS.append(session_entry)
+                 GLOBAL_TOTAL_URLS += (total_saved + total_db_existed)
+                 GLOBAL_SUCCESS += total_saved
+                 GLOBAL_THROTTLE_ERRORS += total_throttles
+                 GLOBAL_OTHER_ERRORS += total_failed
 
-        with site_skip_lock:
-            for skip_type, data in site_skip_report.items():
-                with SKIP_LOCK:
-                    SKIP_REPORT[skip_type]["count"] += data["count"]
-                    SKIP_REPORT[skip_type]["urls"].extend(data["urls"][:5])
+             with site_skip_lock:
+                 for skip_type, data in site_skip_report.items():
+                     with SKIP_LOCK:
+                         SKIP_REPORT[skip_type]["count"] += data["count"]
+                         SKIP_REPORT[skip_type]["urls"].extend(data["urls"][:5])
+             return
 
     except Exception as e:
         fail_crawl_job(job_id, str(e))

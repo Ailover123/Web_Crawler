@@ -402,10 +402,9 @@ class CrawlerWorker(threading.Thread):
                     if urls:
                         self.log("info", f"Skipped: rules={policy_skipped}, domain={domain_skipped}")
 
-                if self.crawl_mode == "BASELINE":
-                    b_id, b_path, b_action = save_baseline(custid=self.custid, siteid=self.siteid, url=self._db_url(url), html=html, base_url=self.seed_url)
-                    self.log("info", f"DB: {b_action.upper()} baseline {b_id}")
-                elif self.crawl_mode == "COMPARE":
+                # NOTE: BASELINE mode is handled by BaselineWorker.py. 
+                # This worker (CrawlerWorker) is for LIVE discovery (CRAWL/COMPARE).
+                if self.crawl_mode == "COMPARE":
                     engine = CompareEngine(custid=self.custid)
                     res = engine.handle_page(siteid=self.siteid, url=self._db_url(url), html=html)
                     if res and self.compare_results is not None:
