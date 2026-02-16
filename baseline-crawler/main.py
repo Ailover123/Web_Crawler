@@ -19,6 +19,7 @@ import urllib3
 import sys
 import os
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -107,7 +108,7 @@ def resolve_seed_url(raw_url: str) -> str:
     for u in candidates:
         try:
             r = requests.get(
-                u if u.startswith(("http://", "https://")) else "https://" + u,
+                u if u.startswith(("https://")) else "https://" + u,
                 timeout=12,
                 allow_redirects=True,
                 headers={"User-Agent": USER_AGENT},
@@ -119,7 +120,7 @@ def resolve_seed_url(raw_url: str) -> str:
             continue
 
     # Last-resort fallback
-    if not raw.startswith(("http://", "https://")):
+    if not raw.startswith(( "https://")):
         raw = "https://" + raw
     return raw
 
@@ -143,7 +144,9 @@ def crawl_site(site, args, target_urls=None):
     resolved_seed = resolve_seed_url(original_site_url)
     
     # Respect the resolved seed exactly (don't force www)
-    start_url = LinkUtility.canonicalize_seed(resolved_seed)
+    p = urlparse(resolved_seed)
+    path = p.path.rstrip("/")
+    start_url = urlunparse((p.scheme, p.netloc, path, "", "", ""))
 
     job_id = str(uuid.uuid4())
     
