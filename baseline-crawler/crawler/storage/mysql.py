@@ -553,15 +553,23 @@ def site_has_baselines(site_id):
         DB_SEMAPHORE.release()
 
 
-def has_site_crawl_data(site_id):
+def has_site_crawl_data(site_id, url=None):
     """Checks if crawl_pages already has entries for this site."""
     conn = get_connection()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM crawl_pages WHERE siteid=%s LIMIT 1",
-            (site_id,),
-        )
+        if url:
+            # Use canonical ID to match DB storage format
+            canonical_url = LinkUtility.get_canonical_id(url)
+            cur.execute(
+                "SELECT 1 FROM crawl_pages WHERE siteid=%s AND url=%s LIMIT 1",
+                (site_id, canonical_url),
+            )
+        else:
+            cur.execute(
+                "SELECT 1 FROM crawl_pages WHERE siteid=%s LIMIT 1",
+                (site_id,),
+            )
         return cur.fetchone() is not None
     finally:
         cur.close()

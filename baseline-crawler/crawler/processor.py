@@ -31,6 +31,7 @@ class LinkUtility:
         if base: url = urljoin(base, url)
         parsed = urlparse(url)
         scheme = parsed.scheme or "https"
+        if scheme == "http": scheme = "https"
         netloc = parsed.netloc.lower()
         path = parsed.path if parsed.path else "/"
         # Strip trailing slash to avoid duplicate fetches
@@ -279,7 +280,7 @@ class LinkExtractor:
     @staticmethod
     def _is_allowed_url(url, base_domain):
         parsed = urlparse(url)
-        if parsed.scheme != "https": return False
+        if parsed.scheme not in ("http", "https"): return False
         cand_ext = tldextract.extract(url)
         base_ext = tldextract.extract(f"https://{base_domain}")
         return cand_ext.registered_domain == base_ext.registered_domain

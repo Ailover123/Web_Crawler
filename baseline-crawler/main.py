@@ -254,7 +254,7 @@ def crawl_site(site, args, target_urls=None):
 
         # 🛡️ Capture initial state for "NEW LINK FOUND" logic
         # In CRAWL mode, "existing data" means we have previously crawled this site.
-        initial_has_data = has_site_crawl_data(siteid)
+        initial_has_data = has_site_crawl_data(siteid, start_url)
 
         # 🛡️ Seed Skip Check
         skip_reason = ExecutionPolicy.classify_skip(start_url)
