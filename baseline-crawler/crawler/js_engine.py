@@ -8,6 +8,7 @@ import threading
 import queue
 import time
 import hashlib
+import re
 from playwright.sync_api import sync_playwright
 from crawler.core import (
     JS_GOTO_TIMEOUT,
@@ -56,6 +57,35 @@ class JSIntelligence:
 
         return False
 
+    @staticmethod
+    def is_404_content(html: str) -> bool:
+        """Heuristic to detect 404/Not Found content even if status is 200."""
+        if not html: return False
+        h = html.lower()
+        # Common 404 patterns
+        patterns = [
+            "page not found",
+            "404 not found",
+            "404 - not found",
+            "doesn't exist",
+            "could not be found",
+            "the page you're looking for",
+            "error 404",
+        ]
+        # Check title first (stronger indicator)
+        title_match = re.search(r'<title[^>]*>(.*?)</title>', h, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            title_text = title_match.group(1).strip()
+            if any(p in title_text for p in patterns) or "404" in title_text:
+                return True
+
+        # Check prominent headings/text
+        if any(f"<{tag}" in h for tag in ["h1", "h2", "strong"]):
+            # If any pattern appears and the page is very small, it's likely a 404
+            if any(p in h for p in patterns) and len(h) < 5000:
+                return True
+        return False
+
 
 # === RENDER CACHE ===
 
@@ -101,9 +131,10 @@ class RenderRequest:
         self.result_queue = queue.Queue()
 
 class RenderResult:
-    def __init__(self, content=None, final_url=None, error=None):
+    def __init__(self, content=None, final_url=None, status_code=200, error=None):
         self.content = content
         self.final_url = final_url
+        self.status_code = status_code
         self.error = error
 
 class BrowserManager:
@@ -136,7 +167,9 @@ class BrowserManager:
                     try:
                         page = context.new_page()
                         try:
-                            page.goto(req.url, wait_until="domcontentloaded", timeout=JS_GOTO_TIMEOUT * 1000)
+                            response = page.goto(req.url, wait_until="domcontentloaded", timeout=JS_GOTO_TIMEOUT * 1000)
+                            status_code = response.status if response else 200
+                            
                             try:
                                 page.wait_for_function("() => document.body && document.body.children.length > 0", timeout=JS_WAIT_TIMEOUT * 1000)
                             except Exception: pass
@@ -150,7 +183,7 @@ class BrowserManager:
 
                             final_url = page.url
                             content = page.content()
-                            req.result_queue.put(RenderResult(content, final_url))
+                            req.result_queue.put(RenderResult(content, final_url, status_code))
                         except Exception as e:
                             req.result_queue.put(RenderResult(error=e))
                         finally:
@@ -171,14 +204,14 @@ class BrowserManager:
             cls._worker_thread.start()
 
     @classmethod
-    def render_sync(cls, url: str) -> tuple[str, str]:
+    def render_sync(cls, url: str) -> tuple[str, str, int]:
         cls._ensure_running()
         req = RenderRequest(url)
         cls._request_queue.put(req)
         result = req.result_queue.get()
         if result.error:
             raise result.error
-        return result.content, result.final_url
+        return result.content, result.final_url, result.status_code
 
     @staticmethod
     def normalize_rendered_html(html: str) -> str:
@@ -204,20 +237,21 @@ class JSRenderWorker(threading.Thread):
         while True:
             url, result_event = self.queue.get()
             try:
-                html, final_url = BrowserManager.render_sync(url)
+                html, final_url, status_code = BrowserManager.render_sync(url)
                 result_event["html"] = BrowserManager.normalize_rendered_html(html)
                 result_event["final_url"] = final_url
+                result_event["status_code"] = status_code
             except Exception as e:
                 result_event["error"] = e
             finally:
                 result_event["done"].set()
                 self.queue.task_done()
 
-    def render(self, url: str, timeout: int = 30) -> tuple[str, str]:
-        event = {"done": threading.Event(), "html": None, "final_url": None, "error": None}
+    def render(self, url: str, timeout: int = 30) -> tuple[str, str, int]:
+        event = {"done": threading.Event(), "html": None, "final_url": None, "status_code": 200, "error": None}
         self.queue.put((url, event))
         if not event["done"].wait(timeout=timeout):
             raise TimeoutError(f"JS rendering timed out after {timeout}s for {url}")
         if event["error"]:
             raise event["error"]
-        return event["html"], event["final_url"]
+        return event["html"], event["final_url"], event["status_code"]

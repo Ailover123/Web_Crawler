@@ -93,16 +93,11 @@ class LinkUtility:
             return ""
 
         url = url.strip()
-
-        if "://" not in url and not url.startswith("/"):
-            url = "https://" + url
-
-        if base:
-            url = urljoin(base, url)
-
+        if "://" not in url and not url.startswith("/"): url = "https://" + url
+        if base: url = urljoin(base, url)
         parsed = urlparse(url)
-
-        scheme = "https"   # Force https for crawling
+        scheme = parsed.scheme or "https"
+        if  scheme = "https"
         netloc = parsed.netloc.lower()
 
         # Apply branding preference (fetch-only logic)
@@ -360,7 +355,7 @@ class LinkExtractor:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"): return False
         cand_ext = tldextract.extract(url)
-        base_ext = tldextract.extract(f"http://{base_domain}")
+        base_ext = tldextract.extract(f"https://{base_domain}")
         return cand_ext.registered_domain == base_ext.registered_domain
 
 
