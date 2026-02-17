@@ -1,7 +1,7 @@
 """
 FILE DESCRIPTION: Global orchestration module managing worker threads, crawl frontier, and execution lifecycle.
 CONSOLIDATED FROM: worker.py, frontier.py, queue.py
-KEY FUNCTIONS/CLASSES: CrawlerWorker, Frontier, CrawlQueue, ExecutionPolicy
+KEY FUNCTIONS/CLASSES: CrawlerWorker, Frontier, ExecutionPolicy
 """
 
 import threading
@@ -169,25 +169,6 @@ class Frontier:
                 "discovered": len(self.discovered)
             }
 
-# Legacy / Alternative Queue
-class CrawlQueue:
-    def __init__(self, max_depth):
-        self.queue = deque()
-        self.visited = set()
-        self.queued = set()
-        self.max_depth = max_depth
-
-    def enqueue(self, url, depth):
-        if depth > self.max_depth or url in self.visited or url in self.queued: return False
-        self.queue.append((url, depth))
-        self.queued.add(url)
-        return True
-
-    def dequeue(self):
-        if not self.queue: return None
-        url, depth = self.queue.popleft()
-        self.queued.discard(url); self.visited.add(url)
-        return url, depth
 
 
 # === CRAWLER WORKER ===
