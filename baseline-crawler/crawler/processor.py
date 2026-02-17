@@ -57,12 +57,12 @@ class LinkUtility:
     # STORAGE CANONICAL (DB)
     # -------------------------------
     @staticmethod
-    def get_canonical_id(url: str) -> str:
+    def get_canonical_id(url: str, base: str | None = None) -> str:
         if not url:
             return ""
 
-        if "://" not in url:
-            url = "https://" + url
+        if  base and "://" not in url:
+            url = urljoin(base,url)
 
         parsed = urlparse(url)
 
@@ -97,7 +97,6 @@ class LinkUtility:
         if base: url = urljoin(base, url)
         parsed = urlparse(url)
         scheme = parsed.scheme or "https"
-        if  scheme = "https"
         netloc = parsed.netloc.lower()
 
         # Apply branding preference (fetch-only logic)

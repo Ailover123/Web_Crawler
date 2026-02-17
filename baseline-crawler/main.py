@@ -312,13 +312,11 @@ def crawl_site(site, args, target_urls=None):
                 job_logger.info(f"Stopping {len(all_active_workers)} workers for site {siteid}...")
                 for w in all_active_workers: w.stop()
                 
-                start_join = time.time()
+                # ✅ V3 Join Logic: Ensure ALL workers are joined before summary prints
+                # This prevents messy logs where workers print "DB: Inserted" inside the table
                 for w in all_active_workers:
                     if w.is_alive():
-                        while w.is_alive():
-                            w.join(timeout=2)
-                            LAST_ACTIVITY_TIME = time.time()
-                            if time.time() - start_join > 15: break
+                        w.join(timeout=10) # Give them 10s each to finish current fetch
                 
                 TrafficControl.set_pause(siteid, 0)
                 TrafficControl.reset_scale_down(siteid)

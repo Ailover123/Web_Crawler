@@ -109,25 +109,39 @@ class Frontier:
         self.discovered = set()
         self.lock = threading.Lock()
 
-    def enqueue(self, url, discovered_from=None, depth=0, preference_url=None) -> bool:
+    def enqueue(self, url, discovered_from=None, depth=0, preference_url=None) -> str:
+        """
+        Returns:
+        - "enqueued" if successful
+        - "policy_skipped" if ExecutionPolicy rejected it
+        - "duplicate" if already visited/in-progress
+        - "recursion" if recursion detected
+        - "failed" for other errors
+        """
+        # ✅ Synchronize normalization first
         normalized = LinkUtility.normalize_url(url, preference_url=preference_url)
+
+        # ✅ Enforcement of skip rules (Tags, Authors, Assets, etc.)
+        if ExecutionPolicy.classify_skip(normalized):
+            return "policy_skipped"
+
         with self.lock:
-            p = urlparse(url)
-            if p.scheme in ("mailto", "tel", "javascript"): return False
-            if normalized in self.visited or normalized in self.in_progress: return False
+            p = urlparse(normalized)
+            if p.scheme in ("mailto", "tel", "javascript"): return "policy_skipped"
+            if normalized in self.visited or normalized in self.in_progress: return "duplicate"
             
             # Recursion protection
             if ExecutionPolicy.is_recursion(normalized):
-                return False
+                return "recursion"
 
             self.in_progress.add(normalized)
             self.discovered.add(normalized)
         try:
             self.queue.put((normalized, discovered_from, depth))
-            return True
+            return "enqueued"
         except Exception:
             with self.lock: self.in_progress.discard(normalized)
-            return False
+            return "failed"
 
     def dequeue(self):
         try:
@@ -214,6 +228,9 @@ class CrawlerWorker(threading.Thread):
         self.failure_reasons = defaultdict(int)
         self.failed_throttle_count = 0 # Tracks 429 and 503 errors
 
+    def stop(self):
+        self.running = False
+
     def is_soft_redirect(self, html: str) -> bool:
         if not html: return False
         h = html.lower()
@@ -242,12 +259,16 @@ class CrawlerWorker(threading.Thread):
     def run(self):
         self.log("info", f"started ({self.crawl_mode})")
 
-        # Initialize CompareEngine once per worker
+        # ✅ Initialize CompareEngine once per worker for efficiency (as requested by USER)
         compare_engine = None
         if self.crawl_mode == "COMPARE":
             compare_engine = CompareEngine(custid=self.custid)
 
         while self.running:
+            # ✅ Add Throttling Alignment (from origin/merger)
+            remaining = TrafficControl.get_remaining_pause(self.siteid)
+            if remaining > 0:
+                 time.sleep(remaining)
 
             item, found = self.frontier.dequeue()
             if not found:
@@ -316,8 +337,11 @@ class CrawlerWorker(threading.Thread):
                             self.log("error", f"JS Render escalation failed: {js_err}")
 
                     if not result["success"]:
-                        self.failed_count += 1
                         reason = result.get("error", "Unknown Fetch Error")
+                        if "ignored content type" in str(reason):
+                            continue
+
+                        self.failed_count += 1
                         if initial_status == 404: reason = "http error: 404"
                         self.failure_reasons[reason] += 1
                         self.log("error", f"Fetch failed for {url}: {reason}")
@@ -325,15 +349,24 @@ class CrawlerWorker(threading.Thread):
 
                 resp = result["response"]
                 final_url = result.get("final_url", url)
-
                 html = resp.content.decode("utf-8", errors="ignore")
 
+                # ✅ Synchronize <base> tag injection (Match BaselineWorker format)
+                if "<base" not in html.lower():
+                    # Insert <base> immediately after <head>
+                    html = re.sub(
+                        r"(<head[^>]*>)",
+                        rf'\1<base href="{fetch_url}">',
+                        html,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+
                 # ======================================================
-                # MODE: CRAWL
+                # MODE: CRAWL (Database Updates)
                 # ======================================================
                 if self.crawl_mode == "CRAWL":
-
-                    # Insert into crawl_pages
+                    # Insert into crawl_pages (Guard: ONLY in CRAWL mode as requested by USER)
                     insert_crawl_page({
                         "job_id": self.job_id,
                         "custid": self.custid,
@@ -348,47 +381,19 @@ class CrawlerWorker(threading.Thread):
                         "fetched_at": datetime.now(),
                         "base_url": self.original_site_url
                     })
-
-                    # Extract + enqueue
-                    urls, _ = LinkExtractor.extract_urls(html, final_url)
-                    if not urls and JSIntelligence.needs_js_rendering(html):
-                        self.js_render_stats["total"] += 1
-                        try:
-                            html, final_url, js_status = JS_RENDERER.render(final_url)
-                            self.js_render_stats["success"] += 1
-                            urls, _ = LinkExtractor.extract_urls(html, final_url)
-                        except Exception as e:
-                            self.js_render_stats["failed"] += 1
-                            self.log("error", f"JS Render failed: {e}")
-
-                    for u in urls:
-                        if not ExecutionPolicy.is_allowed_domain(self.original_site_url, u, current_url=final_url):
-                            continue
-                        self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.original_site_url)
-
-                    continue  # Done for CRAWL
+                    self.saved_count += 1
+                    if self.crawl_mode == "CRAWL":
+                        self.log("info", f"DB: Inserted {self._db_url(final_url)}")
 
                 # ======================================================
                 # MODE: BASELINE
                 # ======================================================
-                if self.crawl_mode == "BASELINE":
-
-                    baseline_id, baseline_path, action = save_baseline(
-                        custid=self.custid,
-                        siteid=self.siteid,
-                        url=self._db_url(final_url),
-                        html=html,
-                      base_url=self.original_site_url
-                    )
-
-                    self.log("info", f"[BASELINE] {action.upper()} {baseline_id}")
-                    continue  # STOP here
+              
 
                 # ======================================================
                 # MODE: COMPARE
                 # ======================================================
-                if self.crawl_mode == "COMPARE":
-
+                elif self.crawl_mode == "COMPARE":
                     results = compare_engine.handle_page(
                         siteid=self.siteid,
                         url=self._db_url(final_url),
@@ -403,7 +408,35 @@ class CrawlerWorker(threading.Thread):
                                 f"[COMPARE] {r['status']} | {r['url']} | Score={r['score']} | Severity={r['severity']}"
                             )
 
-                    continue  # STOP here
+                # ======================================================
+                # SHARED DISCOVERY (CRAWL and COMPARE)
+                # ======================================================
+                if self.crawl_mode in ("CRAWL", "COMPARE") and not self.target_urls:
+                    # Extract + enqueue
+                    urls, _ = LinkExtractor.extract_urls(html, final_url)
+                    if not urls and JSIntelligence.needs_js_rendering(html):
+                        self.js_render_stats["total"] += 1
+                        try:
+                            html, final_url, js_status = JS_RENDERER.render(final_url)
+                            self.js_render_stats["success"] += 1
+                            urls, _ = LinkExtractor.extract_urls(html, final_url)
+                        except Exception as e:
+                            self.js_render_stats["failed"] += 1
+                            self.log("error", f"JS Render failed: {e}")
+
+                    if urls:
+                        for u in urls:
+                            if not self.running: break # ✅ Fast shutdown
+                            if not ExecutionPolicy.is_allowed_domain(self.original_site_url, u, current_url=final_url):
+                                continue
+                            res = self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.original_site_url)
+                            if res == "policy_skipped":
+                                self.policy_skipped_count += 1
+                            elif res == "duplicate":
+                                self.frontier_duplicate_count += 1
+                                self.existed_urls.add(LinkUtility.normalize_url(u, preference_url=self.original_site_url))
+                                if self.crawl_mode == "CRAWL":
+                                    self.log("info", f"Already in DB: {self._db_url(u)}")
 
             except Exception as e:
                 self.log("error", f"Process error for {url}: {e}")
