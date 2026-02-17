@@ -67,7 +67,7 @@ class LinkUtility:
     # STORAGE CANONICAL (DB)
     # -------------------------------
     @staticmethod
-    def get_canonical_id(url: str, base: str | None = None, keep_www: bool = False) -> str:
+    def get_canonical_id(url: str, base: str | None = None, enforce_www: bool = False) -> str:
         if not url:
             return ""
 
@@ -78,9 +78,13 @@ class LinkUtility:
 
         netloc = parsed.netloc.lower()
 
-        # ✅ REMOVE www permanently for DB UNLESS keep_www is True
-        if not keep_www and netloc.startswith("www."):
-            netloc = netloc[4:]
+        # 🛡️ Force/Strip www based on enforce_www
+        if enforce_www:
+            if not netloc.startswith("www."):
+                netloc = "www." + netloc
+        else:
+            if netloc.startswith("www."):
+                netloc = netloc[4:]
 
         path = parsed.path or ""
         path = path.rstrip("/")

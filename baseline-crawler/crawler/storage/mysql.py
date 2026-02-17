@@ -272,16 +272,16 @@ def insert_crawl_page(data):
     # Pass seed_url if available to ensure domain matches sites table
     base_url = data.get("base_url")
     
-    # 🕵️ Detect if the site is registered with 'www.' to preserve it in canonical ID
-    keep_www = False
+    # 🕵️ Detect if the site is registered with 'www.' to enforce it in canonical ID
+    enforce_www = False
     if base_url:
         from urllib.parse import urlparse
         temp_url = base_url
         if "://" not in temp_url:
             temp_url = "https://" + temp_url
-        keep_www = urlparse(temp_url).netloc.lower().startswith("www.")
+        enforce_www = urlparse(temp_url).netloc.lower().startswith("www.")
 
-    canonical_url = LinkUtility.get_canonical_id(data["url"], base_url, keep_www=keep_www)
+    canonical_url = LinkUtility.get_canonical_id(data["url"], base_url, enforce_www=enforce_www)
     if not canonical_url:
         return None
 
