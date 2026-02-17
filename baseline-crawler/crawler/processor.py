@@ -25,6 +25,10 @@ class LinkUtility:
     # -------------------------------
     @staticmethod
     def normalize_url_for_fetch(url: str) -> str:
+        """
+        Normalization for FETCHING (network safe).
+        Forces https:// and smart www prepending.
+        """
         if not url:
             return ""
 
@@ -32,12 +36,18 @@ class LinkUtility:
             url = "https://" + url
 
         parsed = urlparse(url)
-
+        scheme = "https" # Always force https
         netloc = parsed.netloc.lower()
 
-        # ✅ Always use www for network
-        if not netloc.startswith("www."):
-            netloc = "www." + netloc
+        try:
+            ext = tldextract.extract(url)
+            # Only add www. if it is a naked domain (no subdomain)
+            if not ext.subdomain:
+                netloc = "www." + netloc
+        except Exception:
+            # Fallback
+            if not netloc.startswith("www."):
+                netloc = "www." + netloc
 
         path = parsed.path or ""
         path = path.rstrip("/")
@@ -45,7 +55,7 @@ class LinkUtility:
         query = parsed.query
 
         return urlunparse((
-            "https",
+            scheme,
             netloc,
             path,
             "",
@@ -122,25 +132,35 @@ class LinkUtility:
     def force_www_url(url: str) -> str:
         """
         Fetch-only helper.
-        Forces www prefix for crawling.
+        Forces https:// scheme and adds www prefix ONLY for naked domains.
         Does NOT affect DB canonicalization.
         """
-
         if not url:
             return ""
 
+        # Normalize scheme to https
+        if "://" not in url:
+            url = "https://" + url
+            
         parsed = urlparse(url)
+        # Always force https as requested
+        scheme = "https"
         netloc = parsed.netloc.lower()
 
-        # Already has www
-        if netloc.startswith("www."):
-            return url
-
-        # Add www
-        new_netloc = f"www.{netloc}"
+        try:
+            ext = tldextract.extract(url)
+            # Only add www. if it is a naked domain (no subdomain)
+            if not ext.subdomain:
+                new_netloc = f"www.{netloc}"
+            else:
+                # Keep existing subdomain (www, admin, etc.)
+                new_netloc = netloc
+        except Exception:
+            # Fallback to simple logic if tldextract fails
+            new_netloc = netloc if netloc.startswith("www.") else f"www.{netloc}"
 
         return urlunparse((
-            parsed.scheme,
+            scheme,
             new_netloc,
             parsed.path,
             parsed.params,
