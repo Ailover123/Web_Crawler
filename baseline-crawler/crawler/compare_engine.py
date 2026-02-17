@@ -10,6 +10,8 @@ DIFF_ROOT = Path("diffs")
 
 class CompareEngine:
 
+    DEFAULT_THRESHOLD = 1.0
+
     def __init__(self, *, custid: int):
         self.custid = custid
         self._rows = None
@@ -30,8 +32,13 @@ class CompareEngine:
             logger.info(f"[COMPARE] Loaded {len(self._rows)} defacement row(s)")
         return self._rows
 
-    def handle_page(self, *, siteid: int, url: str, html: str, base_url: str | None = None,):
-
+    def handle_page(
+        self,
+        *,
+        siteid: int,
+        url: str,
+        html: str,
+    ):
         if not html:
             return []
 
@@ -39,17 +46,20 @@ class CompareEngine:
         if not rows:
             return []
 
+        # ✅ Canonical URL match
         live_canon = LinkUtility.get_canonical_id(url)
-        observed_hash = ContentNormalizer.semantic_hash(html)
-
         logger.info(f"[COMPARE] LIVE CANON: {live_canon}")
+
+        # ✅ Normalize LIVE HTML
+        normalized_live = ContentNormalizer.normalize_html(html)
+        observed_hash = ContentNormalizer.semantic_hash(normalized_live)
 
         matched = False
         results = []
 
         for row in rows:
 
-            if row["siteid"] != siteid:
+            if int(row["siteid"]) != int(siteid):
                 continue
 
             row_canon = row["url"]
@@ -59,6 +69,10 @@ class CompareEngine:
 
             matched = True
             baseline_id = row["baseline_id"]
+            
+            # Get threshold from DB or use default
+            threshold_val = row.get("threshold")
+            threshold = float(threshold_val) if threshold_val is not None else self.DEFAULT_THRESHOLD
 
             baseline = get_baseline_hash(
                 site_id=siteid,
@@ -69,53 +83,81 @@ class CompareEngine:
                 logger.error("[COMPARE] Baseline missing in DB")
                 continue
 
-            baseline_hash = baseline["content_hash"]
+            baseline_path = Path(baseline["baseline_path"])
+
+            if not baseline_path.exists():
+                logger.error("[COMPARE] Baseline file missing on disk")
+                continue
+
+            # ✅ Normalize BASELINE HTML
+            old_raw_html = baseline_path.read_text(
+                encoding="utf-8",
+                errors="ignore"
+            )
+            normalized_baseline = ContentNormalizer.normalize_html(old_raw_html)
+
+            baseline_hash = ContentNormalizer.semantic_hash(normalized_baseline)
+
+            # =====================================
+            # HASH COMPARISON (CLEAN + STABLE)
+            # =====================================
 
             if observed_hash == baseline_hash:
-                changed = False
-                severity = "NONE"
-                score = 0.0
-                diff_path = None
-                logger.info("[COMPARE] UNCHANGED")
-            else:
-                changed = True
-                logger.warning("[COMPARE] CHANGE DETECTED")
+                logger.info(f"[COMPARE] UNCHANGED (Hash Match) - {url}")
+                continue
 
-                baseline_path = Path(baseline["baseline_path"])
-                old_html = baseline_path.read_text(
-                    encoding="utf-8",
-                    errors="ignore"
-                )
+            # =====================================
+            # CALCULATE SCORE
+            # =====================================
+            
+            score = self._percentage_fn(
+                normalized_baseline,
+                normalized_live,
+                threshold=threshold
+            )
 
-                score = self._percentage_fn(old_html, html)
-                severity = self._severity_fn(score)
+            if score < threshold:
+                logger.info(f"[COMPARE] UNCHANGED (Score {score} < {threshold}) - {url}")
+                continue
 
-                diff_dir = DIFF_ROOT / str(self.custid) / str(siteid)
-                diff_dir.mkdir(parents=True, exist_ok=True)
+            # =====================================
+            # CHANGE DETECTED >= THRESHOLD
+            # =====================================
+            
+            logger.warning(f"[COMPARE] DEFACEMENT DETECTED: {score}% >= {threshold}%")
 
-                timestamp = datetime.now().strftime("%H%M%S%d%m%Y")
-                prefix = f"{timestamp}-{baseline_id}"
+            severity = self._severity_fn(score)
 
-                diff_path = diff_dir / f"{prefix}.html"
+            diff_dir = DIFF_ROOT / str(self.custid) / str(siteid)
+            diff_dir.mkdir(parents=True, exist_ok=True)
 
-                self._diff_fn(
-                    url=url,
-                    html_a=old_html,
-                    html_b=html,
-                    out_dir=diff_dir,
-                    file_prefix=prefix,
-                    severity=severity,
-                    score=score,
-                    checked_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                )
+            timestamp = datetime.now().strftime("%H%M%S%d%m%Y")
+            prefix = f"{timestamp}-{baseline_id}"
+
+            diff_path = diff_dir / f"{prefix}.html"
+
+            self._diff_fn(
+                url=url,
+                html_a=normalized_baseline,
+                html_b=normalized_live,
+                out_dir=diff_dir,
+                file_prefix=prefix,
+                severity=severity,
+                score=score,
+                checked_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            )
+
+            # =====================================
+            # UPSERT OBSERVED STATE
+            # =====================================
 
             insert_observed_page(
                 site_id=siteid,
                 baseline_id=baseline_id,
                 normalized_url=row_canon,
                 observed_hash=observed_hash,
-                changed=changed,
-                diff_path=str(diff_path) if changed else None,
+                changed=True,
+                diff_path=str(diff_path),
                 defacement_score=score,
                 defacement_severity=severity
             )
@@ -123,7 +165,9 @@ class CompareEngine:
             results.append({
                 "baseline_id": baseline_id,
                 "url": url,
-                "status": "CHANGED" if changed else "UNCHANGED"
+                "status": "CHANGED",
+                "score": score,
+                "severity": severity
             })
 
         if not matched:

@@ -86,7 +86,7 @@ class BaselineWorker:
                 siteid=self.siteid,
                 url=url,              # IMPORTANT: DB identity
                 html=html_content,
-                base_url=self.seed_url,
+                
             )
 
             return action, f"id={baseline_id} url={url}", thread_name

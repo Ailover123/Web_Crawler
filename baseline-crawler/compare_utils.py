@@ -902,8 +902,8 @@ def calculate_defacement_percentage(
     Returns defacement percentage (0.0 – 100.0)
     Includes a boost for critical tag changes (title, h1) IF score < threshold.
     """
-    base_lines = _html_to_semantic_lines(baseline_html)
-    obs_lines = _html_to_semantic_lines(observed_html)
+    base_lines = _html_to_semantic_lines(baseline_html, strip_noise=True)
+    obs_lines = _html_to_semantic_lines(observed_html, strip_noise=True)
 
     if not base_lines:
         return 100.0 if obs_lines else 0.0
@@ -950,7 +950,7 @@ def semantic_hash(html: str) -> str:
     Stable against whitespace and attribute ordering changes.
     """
     import hashlib
-    lines = _html_to_semantic_lines(html)
+    lines = _html_to_semantic_lines(html, strip_noise=True)
     content = "\n".join(lines)
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
