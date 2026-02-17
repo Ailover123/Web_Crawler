@@ -344,12 +344,19 @@ class LinkExtractor:
             
             # Heuristic for domain-prefixed links (e.g., allianceproit.com/services)
             if not href.startswith('/') and '://' not in href and not href.startswith('#'):
-                first_part = href.split('/')[0].lower()
+                # Extract the potential domain part, ignoring leading ./ or ../
+                temp_href = href
+                while temp_href.startswith('./') or temp_href.startswith('../'):
+                    if temp_href.startswith('./'): temp_href = temp_href[2:]
+                    else: temp_href = temp_href[3:]
+                
+                first_part = temp_href.split('/')[0].lower()
                 if '.' in first_part and not first_part.startswith('.'):
                     current_netloc = urlparse(base_url).netloc.lower().replace('www.', '')
                     clean_cand = first_part.replace('www.', '')
-                    if clean_cand == current_netloc or clean_cand.split('.')[0] in current_netloc:
-                        href = f"{urlparse(base_url).scheme or 'https'}://{href}"
+                    # ✅ Refined heuristic: Only match if it's the same domain or a clear subdomain relationship
+                    if clean_cand == current_netloc or clean_cand.endswith("." + current_netloc) or current_netloc.endswith("." + clean_cand):
+                        href = f"{urlparse(base_url).scheme or 'https'}://{temp_href}"
 
             url = strip_fragment(urljoin(base_url, href))
             if "®" in url: url = url.replace("®", "&reg")
@@ -373,6 +380,15 @@ class LinkExtractor:
     def _is_allowed_url(url, base_domain):
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"): return False
+        
+        # ✅ Block recursive malformed paths (e.g. domain.com/path/domain.com/...)
+        domain_part = base_domain.replace("www.", "").lower()
+        path_lower = parsed.path.lower()
+        if (f"/{domain_part}/" in path_lower or 
+            path_lower.startswith(f"{domain_part}/") or 
+            path_lower.endswith(f"/{domain_part}")):
+            return False
+
         cand_ext = tldextract.extract(url)
         base_ext = tldextract.extract(f"https://{base_domain}")
         return cand_ext.registered_domain == base_ext.registered_domain
