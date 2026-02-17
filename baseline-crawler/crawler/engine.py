@@ -209,6 +209,15 @@ class CrawlerWorker(threading.Thread):
         self.failure_reasons = defaultdict(int)
         self.failed_throttle_count = 0 # Tracks 429 and 503 errors
 
+        # 🕵️ Detect if the site is registered with 'www.' to preserve it in canonical ID
+        self.keep_www = False
+        if self.original_site_url:
+            from urllib.parse import urlparse
+            temp_url = self.original_site_url
+            if "://" not in temp_url:
+                temp_url = "https://" + temp_url
+            self.keep_www = urlparse(temp_url).netloc.lower().startswith("www.")
+
     def stop(self):
         self.running = False
 
@@ -226,7 +235,7 @@ class CrawlerWorker(threading.Thread):
     def _db_url(self, url):
         # ✅ Standardize on Canonical ID for log consistency
         from crawler.processor import LinkUtility
-        return LinkUtility.get_canonical_id(url, self.original_site_url or "")
+        return LinkUtility.get_canonical_id(url, self.original_site_url or "", keep_www=self.keep_www)
 
     def log(self, level, msg):
         getattr(logger, level)(msg, extra={'context': self.name})
@@ -354,7 +363,7 @@ class CrawlerWorker(threading.Thread):
                         "custid": self.custid,
                         "siteid": self.siteid,
                         "url": final_url, # Pass raw URL, mysql.py handles canonicalization
-                        "parent_url": LinkUtility.get_canonical_id(discovered_from, self.original_site_url) if discovered_from else None,
+                        "parent_url": LinkUtility.get_canonical_id(discovered_from, self.original_site_url, keep_www=self.keep_www) if discovered_from else None,
                         "depth": depth,
                         "status_code": resp.status_code,
                         "content_type": resp.headers.get("Content-Type", ""),
