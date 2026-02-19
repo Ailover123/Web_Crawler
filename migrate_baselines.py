@@ -90,7 +90,7 @@ def migrate_baselines():
 
         # 2. Fetch new table mappings (URL -> baseline_id)
         logging.info(f"Fetching mappings from {NEW_TABLE}...")
-        cursor.execute(f"SELECT url, baseline_id FROM {NEW_TABLE}")
+        cursor.execute(f"SELECT url, baseline_id FROM {NEW_TABLE} WHERE siteid = '93299'")
         new_rows = cursor.fetchall()
         url_to_new_id = {row['url']: row['baseline_id'] for row in new_rows if row['baseline_id']}
 
