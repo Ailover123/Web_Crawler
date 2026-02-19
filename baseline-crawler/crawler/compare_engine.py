@@ -54,6 +54,7 @@ class CompareEngine:
         # ✅ Normalize LIVE HTML
         normalized_live = ContentNormalizer.normalize_html(html)
         observed_hash = ContentNormalizer.semantic_hash(normalized_live)
+        logger.info(f"[COMPARE] OBSERVED_HASH: {observed_hash}")
 
         matched = False
         results = []
@@ -98,6 +99,7 @@ class CompareEngine:
             normalized_baseline = ContentNormalizer.normalize_html(old_raw_html)
 
             baseline_hash = ContentNormalizer.semantic_hash(normalized_baseline)
+            logger.info(f"[COMPARE] BASELINE_HASH: {baseline_hash}")
 
             # =====================================
             # HASH COMPARISON (CLEAN + STABLE)
