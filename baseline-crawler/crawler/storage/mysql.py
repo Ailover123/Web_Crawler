@@ -164,7 +164,7 @@ def fetch_enabled_sites():
     conn = get_connection()
     try:
         cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT siteid, custid, url FROM sites WHERE enabled = 1")
+        cur.execute("SELECT siteid, custid, url FROM sites")
         return cur.fetchall()
     finally:
         cur.close()
