@@ -351,6 +351,23 @@ class CrawlerWorker(threading.Thread):
                 final_url = result.get("final_url", url)
                 html = resp.content.decode("utf-8", errors="ignore")
 
+                # ======================================================
+                # 🚀 SPA / React Detection & Escalation (Match BaselineWorker behavior)
+                # ======================================================
+                if JSIntelligence.needs_js_rendering(html):
+                    self.log("info", f"SPA shell detected for {url}. Escalating to JS Rendering for full content...")
+                    self.js_render_stats["total"] += 1
+                    try:
+                        rendered_html, r_final_url, js_status = JS_RENDERER.render(fetch_url)
+                        if rendered_html and len(rendered_html) > len(html):
+                            html = rendered_html
+                            final_url = r_final_url or final_url
+                            self.js_render_stats["success"] += 1
+                            self.log("info", f"JS Rendering successful for {url} ({len(html)} bytes)")
+                    except Exception as e:
+                        self.js_render_stats["failed"] += 1
+                        self.log("error", f"JS Render escalation failed for {url}: {e}")
+
                 # ✅ Synchronize <base> tag injection (Match BaselineWorker format)
                 if "<base" not in html.lower():
                     # Insert <base> immediately after <head>
@@ -396,7 +413,7 @@ class CrawlerWorker(threading.Thread):
                 elif self.crawl_mode == "COMPARE":
                     results = compare_engine.handle_page(
                         siteid=self.siteid,
-                        url=self._db_url(final_url),
+                        url=final_url, # ✅ Pass full URL to prevent corruption in CompareEngine
                         html=html,
                         base_url=self.original_site_url
                     )
