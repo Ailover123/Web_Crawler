@@ -271,7 +271,17 @@ def insert_crawl_page(data):
 
     # Pass seed_url if available to ensure domain matches sites table
     base_url = data.get("base_url")
-    canonical_url = LinkUtility.get_canonical_id(data["url"], base_url)
+    
+    # 🕵️ Detect if the site is registered with 'www.' to enforce it in canonical ID
+    enforce_www = False
+    if base_url:
+        from urllib.parse import urlparse
+        temp_url = base_url
+        if "://" not in temp_url:
+            temp_url = "https://" + temp_url
+        enforce_www = urlparse(temp_url).netloc.lower().startswith("www.")
+
+    canonical_url = LinkUtility.get_canonical_id(data["url"], base_url, enforce_www=enforce_www)
     if not canonical_url:
         return None
 
@@ -332,13 +342,6 @@ def insert_crawl_page(data):
                     raise e
 
         conn.commit()
-
-        if action == "Inserted":
-            from crawler.core import logger
-            logger.info(f"DB: Inserted {canonical_url} (ID: {affected_id})")
-        elif action == "Updated":
-            from crawler.core import logger
-            logger.info(f"DB: Updated {canonical_url} (ID: {affected_id})")
 
         return {
             "action": action,

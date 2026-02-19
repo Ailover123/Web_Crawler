@@ -1,7 +1,7 @@
 """
 FILE DESCRIPTION: Global orchestration module managing worker threads, crawl frontier, and execution lifecycle.
 CONSOLIDATED FROM: worker.py, frontier.py, queue.py
-KEY FUNCTIONS/CLASSES: CrawlerWorker, Frontier, CrawlQueue, ExecutionPolicy
+KEY FUNCTIONS/CLASSES: CrawlerWorker, Frontier, ExecutionPolicy
 """
 
 import threading
@@ -169,25 +169,7 @@ class Frontier:
                 "discovered": len(self.discovered)
             }
 
-# Legacy / Alternative Queue
-class CrawlQueue:
-    def __init__(self, max_depth):
-        self.queue = deque()
-        self.visited = set()
-        self.queued = set()
-        self.max_depth = max_depth
 
-    def enqueue(self, url, depth):
-        if depth > self.max_depth or url in self.visited or url in self.queued: return False
-        self.queue.append((url, depth))
-        self.queued.add(url)
-        return True
-
-    def dequeue(self):
-        if not self.queue: return None
-        url, depth = self.queue.popleft()
-        self.queued.discard(url); self.visited.add(url)
-        return url, depth
 
 
 # === CRAWLER WORKER ===
@@ -228,6 +210,15 @@ class CrawlerWorker(threading.Thread):
         self.failure_reasons = defaultdict(int)
         self.failed_throttle_count = 0 # Tracks 429 and 503 errors
 
+        # 🕵️ Detect if the site is registered with 'www.' to enforce it in canonical ID
+        self.enforce_www = False
+        if self.original_site_url:
+            from urllib.parse import urlparse
+            temp_url = self.original_site_url
+            if "://" not in temp_url:
+                temp_url = "https://" + temp_url
+            self.enforce_www = urlparse(temp_url).netloc.lower().startswith("www.")
+
     def stop(self):
         self.running = False
 
@@ -243,15 +234,9 @@ class CrawlerWorker(threading.Thread):
         return False
 
     def _db_url(self, url):
-        p = urlparse(url)
-        host = p.netloc.lower()
-        if self.original_site_url:
-            temp_nl = urlparse(self.original_site_url if "://" in self.original_site_url else "https://"+self.original_site_url)
-            nl = temp_nl.netloc.lower()
-            
-            if host.startswith("www.") and not nl.startswith("www."): 
-                host = host[4:]
-        return f"{host}{p.path or ''}{'?' + p.query if p.query else ''}"
+        # ✅ Standardize on Canonical ID for log consistency
+        from crawler.processor import LinkUtility
+        return LinkUtility.get_canonical_id(url, self.original_site_url or "", enforce_www=self.enforce_www)
 
     def log(self, level, msg):
         getattr(logger, level)(msg, extra={'context': self.name})
@@ -268,6 +253,7 @@ class CrawlerWorker(threading.Thread):
             # ✅ Add Throttling Alignment (from origin/merger)
             remaining = TrafficControl.get_remaining_pause(self.siteid)
             if remaining > 0:
+                 self.log("info", f"Domain-wide pause active. Sleeping {remaining:.1f}s...")
                  time.sleep(remaining)
 
             item, found = self.frontier.dequeue()
@@ -278,6 +264,7 @@ class CrawlerWorker(threading.Thread):
                 continue
 
             url, discovered_from, depth = item
+            self.log("info", f"Processing: {url} (depth={depth})")
 
             try:
                 # -------------------------
@@ -384,12 +371,13 @@ class CrawlerWorker(threading.Thread):
                 # ======================================================
                 if self.crawl_mode == "CRAWL":
                     # Insert into crawl_pages (Guard: ONLY in CRAWL mode as requested by USER)
-                    insert_crawl_page({
+                    # ✅ Capture return value to only increment count on SUCCESSFUL insert
+                    res = insert_crawl_page({
                         "job_id": self.job_id,
                         "custid": self.custid,
                         "siteid": self.siteid,
-                        "url": self._db_url(final_url),
-                        "parent_url": self._db_url(discovered_from) if discovered_from else None,
+                        "url": final_url, # Pass raw URL, mysql.py handles canonicalization
+                        "parent_url": LinkUtility.get_canonical_id(discovered_from, self.original_site_url, enforce_www=self.enforce_www) if discovered_from else None,
                         "depth": depth,
                         "status_code": resp.status_code,
                         "content_type": resp.headers.get("Content-Type", ""),
@@ -398,9 +386,12 @@ class CrawlerWorker(threading.Thread):
                         "fetched_at": datetime.now(),
                         "base_url": self.original_site_url
                     })
-                    self.saved_count += 1
-                    if self.crawl_mode == "CRAWL":
-                        self.log("info", f"DB: Inserted {self._db_url(final_url)}")
+                    if res and res.get("action") == "Inserted":
+                        self.saved_count += 1
+                        self.log("info", f"DB: Inserted {self._db_url(final_url)} (ID: {res.get('id')})")
+                    elif res and res.get("action") == "Existed":
+                        self.log("info", f"DB: Existed (Not-Touched) {self._db_url(final_url)} (ID: {res.get('id')})")
+                        self.existed_urls.add(LinkUtility.normalize_url(final_url, preference_url=self.original_site_url))
 
                 # ======================================================
                 # MODE: BASELINE
@@ -442,18 +433,28 @@ class CrawlerWorker(threading.Thread):
                             self.log("error", f"JS Render failed: {e}")
 
                     if urls:
+                        pg_enqueued = 0
+                        pg_rules_skipped = 0
+                        pg_domain_skipped = 0
                         for u in urls:
                             if not self.running: break # ✅ Fast shutdown
                             if not ExecutionPolicy.is_allowed_domain(self.original_site_url, u, current_url=final_url):
+                                pg_domain_skipped += 1
                                 continue
                             res = self.frontier.enqueue(u, final_url, depth + 1, preference_url=self.original_site_url)
-                            if res == "policy_skipped":
+                            if res == "enqueued":
+                                pg_enqueued += 1
+                            elif res == "policy_skipped":
+                                pg_rules_skipped += 1
                                 self.policy_skipped_count += 1
                             elif res == "duplicate":
                                 self.frontier_duplicate_count += 1
-                                self.existed_urls.add(LinkUtility.normalize_url(u, preference_url=self.original_site_url))
-                                if self.crawl_mode == "CRAWL":
-                                    self.log("info", f"Already in DB: {self._db_url(u)}")
+                                # self.existed_urls.add(...) removed - only add true DB hits
+                                # Repetitive logs removed here
+                        
+                        if self.crawl_mode == "CRAWL":
+                             self.log("info", f"Enqueued {pg_enqueued} URLs")
+                             self.log("info", f"Skipped: rules={pg_rules_skipped}, domain={pg_domain_skipped}")
 
             except Exception as e:
                 self.log("error", f"Process error for {url}: {e}")
