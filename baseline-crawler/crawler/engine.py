@@ -406,7 +406,8 @@ class CrawlerWorker(threading.Thread):
                         siteid=self.siteid,
                         url=final_url, # ✅ Pass full URL to prevent corruption in CompareEngine
                         html=html,
-                        base_url=self.original_site_url
+                        base_url=self.original_site_url,
+                        enforce_www=self.enforce_www
                     )
 
                     if results:

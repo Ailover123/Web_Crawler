@@ -38,7 +38,8 @@ class CompareEngine:
         siteid: int,
         url: str,
         html: str,
-        base_url: str | None = None
+        base_url: str | None = None,
+        enforce_www: bool = False
     ):
         if not html:
             return []
@@ -48,7 +49,7 @@ class CompareEngine:
             return []
 
         # ✅ Canonical URL match
-        live_canon = LinkUtility.get_canonical_id(url, base_url)
+        live_canon = LinkUtility.get_canonical_id(url, base_url, enforce_www=enforce_www)
         logger.info(f"[COMPARE] LIVE CANON: {live_canon}")
 
         # ✅ Normalize LIVE HTML
