@@ -71,6 +71,11 @@ class LinkUtility:
         if not url:
             return ""
 
+        # 🛡️ Ensure scheme exists for correct netloc/path parsing
+        # This prevents "double www" if url is already a schemeless canonical ID
+        if "://" not in url and not url.startswith("/"):
+            url = "https://" + url
+
         if  base and "://" not in url:
             url = urljoin(base,url)
 
@@ -300,6 +305,16 @@ class PageFetcher:
                         "content_type": content_type, "fetch_time_ms": fetch_time_ms,
                         "html": r.text if "text/html" in content_type else "",
                     }
+            except requests.exceptions.TooManyRedirects as e:
+                # Capture the "Real" status of the last hop if available
+                last_status = 0
+                if hasattr(e, 'response') and e.response is not None:
+                    last_status = e.response.status_code
+                return {
+                    "success": False, "error": "Too many redirects", 
+                    "status_code": last_status, "final_url": url,
+                    "content_type": "", "fetch_time_ms": int((time.time() - start_time) * 1000)
+                }
             except Exception as e:
                 if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)) and attempt < max_retries:
                     err_type = "Timeout" if isinstance(e, requests.exceptions.Timeout) else "Connection Error"
@@ -308,9 +323,13 @@ class PageFetcher:
                     retry_delay *= 2
                     logger.info(f"Retrying {url} now (Attempt {attempt+1}/{max_retries+1})...")
                     continue
-                return {"success": False, "error": str(e), "content_type": "", "fetch_time_ms": int((time.time() - start_time) * 1000)}
-
-
+                
+                # Base case for all other networking/connection failures
+                return {
+                    "success": False, "error": str(e), 
+                    "status_code": 0, "final_url": url,
+                    "content_type": "", "fetch_time_ms": int((time.time() - start_time) * 1000)
+                }
 # === LINK EXTRACTOR ===
 
 class LinkExtractor:
