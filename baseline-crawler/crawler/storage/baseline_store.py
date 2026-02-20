@@ -50,18 +50,18 @@ def _next_baseline_id(site_dir: Path, siteid: int) -> str:
 # --------------------------------------------------
 # FINAL STABLE BASELINE SAVE
 # --------------------------------------------------
-def save_baseline(*, custid, siteid, url, html):
+def save_baseline(*, custid, siteid, url, html, enforce_www=False):
     """
     Stable baseline logic:
 
-    - Canonicalize ONCE (no base_url)
-    - Remove www for DB storage
+    - Canonicalize ONCE (respecting enforce_www)
+    - Handle www based on site preference
     - Never re-canonicalize DB rows later
     - Update existing baseline if present
     """
 
-    # 🔒 Canonical for DB (NO WWW)
-    canonical = LinkUtility.get_canonical_id(url)
+    # 🔒 Canonical for DB (Respecting site preference)
+    canonical = LinkUtility.get_canonical_id(url, enforce_www=enforce_www)
 
     content_hash = ContentNormalizer.semantic_hash(html)
 
