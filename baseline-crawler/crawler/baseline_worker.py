@@ -25,6 +25,15 @@ class BaselineWorker:
         self.seed_url = seed_url
         self.target_urls = target_urls
         self.heartbeat_callback = heartbeat_callback
+        
+        # 🕵️ Detect if the site is registered with 'www.' to enforce it in canonical ID
+        self.enforce_www = False
+        if self.seed_url:
+            from urllib.parse import urlparse
+            temp_url = self.seed_url
+            if "://" not in temp_url:
+                temp_url = "https://" + temp_url
+            self.enforce_www = urlparse(temp_url).netloc.lower().startswith("www.")
 
         # Use MAX_WORKERS from config, but ensure we don't exceed reasonable limits
         # relative to the DB pool size if running mainly in parallel.
@@ -86,7 +95,7 @@ class BaselineWorker:
                 siteid=self.siteid,
                 url=url,              # IMPORTANT: DB identity
                 html=html_content,
-                
+                enforce_www=self.enforce_www # ✅ Match site preference
             )
 
             return action, f"id={baseline_id} url={url}", thread_name
