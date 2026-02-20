@@ -209,6 +209,7 @@ class CrawlerWorker(threading.Thread):
         self.js_render_stats = {"total": 0, "success": 0, "failed": 0}
         self.failure_reasons = defaultdict(int)
         self.failed_throttle_count = 0 # Tracks 429 and 503 errors
+        self.missing_baselines = [] # ✅ Track URLs with missing baselines
 
         # 🕵️ Detect if the site is registered with 'www.' to enforce it in canonical ID
         self.enforce_www = False
@@ -318,6 +319,23 @@ class CrawlerWorker(threading.Thread):
                                 self.failed_count += 1
                                 self.failure_reasons[reason] += 1
                                 self.log("error", f"Fetch failed after JS escalation for {url}: {reason}")
+                                
+                                # ✅ Sync fail status to DB in COMPARE mode even on JS failure
+                                if self.crawl_mode == "COMPARE":
+                                    insert_crawl_page({
+                                        "job_id": self.job_id,
+                                        "custid": self.custid,
+                                        "siteid": self.siteid,
+                                        "url": url,
+                                        "parent_url": LinkUtility.get_canonical_id(discovered_from, self.original_site_url, enforce_www=self.enforce_www) if discovered_from else None,
+                                        "depth": depth,
+                                        "status_code": js_status or 500,
+                                        "content_type": "",
+                                        "content_length": 0,
+                                        "response_time_ms": int((time.time() - start_time) * 1000),
+                                        "fetched_at": datetime.now(),
+                                        "base_url": self.original_site_url
+                                    })
                                 continue
                         except Exception as js_err:
                             self.js_render_stats["failed"] += 1
@@ -332,6 +350,29 @@ class CrawlerWorker(threading.Thread):
                         if initial_status == 404: reason = "http error: 404"
                         self.failure_reasons[reason] += 1
                         self.log("error", f"Fetch failed for {url}: {reason}")
+                        
+                        # ✅ Sync fail status to DB in COMPARE mode as requested
+                        if self.crawl_mode == "COMPARE":
+                            # ✅ USE RAW STATUS CODE ONLY (No assumptions as requested)
+                            sync_status = result.get("status_code", initial_status)
+                            
+                            self.log("info", f"[DEBUG-COMPARE] Syncing RAW failure to DB: {url} | Status: {sync_status} (Reason: {reason})")
+                            
+                            insert_crawl_page({
+                                "job_id": self.job_id,
+                                "custid": self.custid,
+                                "siteid": self.siteid,
+                                "url": url,
+                                "parent_url": LinkUtility.get_canonical_id(discovered_from, self.original_site_url, enforce_www=self.enforce_www) if discovered_from else None,
+                                "depth": depth,
+                                "status_code": sync_status,
+                                "content_type": "",
+                                "content_length": 0,
+                                "response_time_ms": result.get("fetch_time_ms", 0),
+                                "fetched_at": datetime.now(),
+                                "base_url": self.original_site_url
+                            })
+                        
                         continue
 
                 resp = result["response"]
@@ -412,10 +453,34 @@ class CrawlerWorker(threading.Thread):
 
                     if results:
                         for r in results:
-                            self.log(
-                                "warning" if r["status"] == "CHANGED" else "info",
-                                f"[COMPARE] {r['status']} | {r['url']} | Score={r['score']} | Severity={r['severity']}"
-                            )
+                            # ✅ Determine description update
+                            desc_val = None
+                            if r["status"] in ("EMPTY_BASELINE", "NOT_MONITORED"):
+                                desc_val = "empty_baseline"
+                                self.missing_baselines.append(r["url"])
+                            
+                            # ✅ Always update/sync description in COMPARE mode
+                            insert_crawl_page({
+                                "job_id": self.job_id,
+                                "custid": self.custid,
+                                "siteid": self.siteid,
+                                "url": r["url"],
+                                "parent_url": LinkUtility.get_canonical_id(discovered_from, self.original_site_url, enforce_www=self.enforce_www) if discovered_from else None,
+                                "depth": depth,
+                                "status_code": resp.status_code,
+                                "content_type": resp.headers.get("Content-Type", ""),
+                                "content_length": len(resp.content),
+                                "response_time_ms": result["fetch_time_ms"],
+                                "fetched_at": datetime.now(),
+                                "base_url": self.original_site_url,
+                                "description": desc_val # ✅ Set or Clear
+                            })
+                            
+                            if r["status"] != "NOT_MONITORED":
+                                self.log(
+                                    "warning" if r["status"] == "CHANGED" else "info",
+                                    f"[COMPARE] {r['status']} | {r['url']} | Score={r['score']} | Severity={r['severity']}"
+                                )
 
                 # ======================================================
                 # SHARED DISCOVERY (CRAWL and COMPARE)
