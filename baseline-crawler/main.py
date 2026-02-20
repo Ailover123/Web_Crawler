@@ -425,8 +425,7 @@ def crawl_site(site, args, target_urls=None):
              has_fs_files = baseline_dir.exists() and any(baseline_dir.glob("*.html"))
              
              if not (has_db_data and has_fs_files):
-                  job_logger.error(f"Site {siteid} has no baselines to compare against. Please run baseline mode first.")
-                  return
+                  job_logger.warning(f"Site {siteid} has no existing baselines. Proceeding with crawl to identify and mark missing baselines.")
              
              job_logger.info(f"[MODE] COMPARE (live discovery + diff for siteid={siteid})")
 
@@ -573,7 +572,10 @@ def crawl_site(site, args, target_urls=None):
 
         # Collect session data early to be safe
              all_new_urls = []
-             for w in all_active_workers: all_new_urls.extend(getattr(w, 'new_urls', []))
+             all_missing_baselines = []
+             for w in all_active_workers:
+                 all_new_urls.extend(getattr(w, 'new_urls', []))
+                 all_missing_baselines.extend(getattr(w, 'missing_baselines', []))
 
              session_entry = {
                  "custid": custid, "siteid": siteid, "url": original_site_url,
@@ -602,8 +604,17 @@ def crawl_site(site, args, target_urls=None):
             "-" * 70,
             f"{'JS Rendering':<25} | {js_renders['total']:<7} | (Success: {js_renders['success']} | Failed: {js_renders['failed']})",
             f"{'Failure Details':<25} | {total_failed:<7} | ({fail_details})",
-                 "-" * 70 + "\n"
-             ]
+            "-" * 70,
+        ]
+
+             if all_missing_baselines:
+                 summary_lines.append(f"MISSING BASELINES URLs ({len(all_missing_baselines)}):")
+                 for mu in all_missing_baselines[:50]: # Cap at 50 for logs
+                     summary_lines.append(f"  - {mu}")
+                 if len(all_missing_baselines) > 50:
+                     summary_lines.append(f"  ... and {len(all_missing_baselines)-50} more.")
+                 summary_lines.append("-" * 70)
+             summary_lines.append("\n") # This was part of the original last line, now needs to be appended separately
              with SUMMARY_LOCK: job_logger.info("\n".join(summary_lines))
 
              with GLOBAL_LOCK:
