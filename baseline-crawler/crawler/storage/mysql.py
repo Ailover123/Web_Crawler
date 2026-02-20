@@ -90,6 +90,34 @@ def ensure_baseline_columns(conn):
             if cur.fetchone()[0] == 0:
                 logger.info(f"[MIGRATION] Adding column {col_name} to defacement_sites...")
                 cur.execute(f"ALTER TABLE defacement_sites ADD COLUMN {col_name} {col_def}")
+        conn.commit()
+    except Exception as e:
+        logger.error(f"[MIGRATION] Failed to ensure baseline schema: {e}")
+
+def ensure_crawl_pages_columns(conn):
+    """ Migration helper for crawl_pages table. """
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'crawl_pages'
+              AND COLUMN_NAME = 'description'
+            """
+        )
+        if cur.fetchone()[0] == 0:
+            logger.info("[MIGRATION] Adding column 'description' to crawl_pages...")
+            cur.execute("ALTER TABLE crawl_pages ADD COLUMN description VARCHAR(255) NULL")
+        conn.commit()
+    except Exception as e:
+        logger.error(f"[MIGRATION] Failed to ensure crawl_pages schema: {e}")
+
+def repair_schema(conn):
+    """ Fix crawl_jobs Foreign Key and other schema inconsistencies. """
+    try:
+        cur = conn.cursor()
         # -------------------------------------------------------------
         # SCHEMA REPAIR: Fix crawl_jobs Foreign Key (sites_old -> sites)
         # -------------------------------------------------------------
@@ -119,13 +147,12 @@ def ensure_baseline_columns(conn):
         old_fk = cur.fetchone()
         
         if old_fk:
-            fk_name = old_fk[0]  # e.g., crawl_jobs_ibfk_1
+            fk_name = old_fk[0]
             logger.info(f"[SCHEMA REPAIR] Found obsolete FK {fk_name} (crawl_jobs -> sites_old). Dropping...")
             cur.execute(f"ALTER TABLE crawl_jobs DROP FOREIGN KEY {fk_name}")
             
             # 3. Add new Foreign Key (crawl_jobs -> sites)
             logger.info("[SCHEMA REPAIR] Adding new FK (crawl_jobs -> sites)...")
-            # Ensure no orphan jobs exist before adding constraint
             cur.execute("DELETE FROM crawl_jobs WHERE siteid NOT IN (SELECT siteid FROM sites)")
             cur.execute(
                 """
@@ -135,6 +162,9 @@ def ensure_baseline_columns(conn):
                 ON DELETE CASCADE
                 """
             )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"[SCHEMA REPAIR] Failed: {e}")
         
         conn.commit()
     except Exception as e:
@@ -152,6 +182,8 @@ def check_db_health():
         
         # Run schema check on health check
         ensure_baseline_columns(conn)
+        ensure_crawl_pages_columns(conn)
+        repair_schema(conn)
         
         return is_healthy
     finally:
@@ -259,12 +291,18 @@ def fail_crawl_job(job_id, err):
 
 
 def insert_crawl_page(data):
-    # 🛡️ Safety check: Prevent any crawl_pages insertions during BASELINE or COMPARE mode
+    # EXCEPT if we are manually marking (or clearing) a baseline description as requested.
     crawl_mode = os.getenv("CRAWL_MODE", "CRAWL").upper()
-    if crawl_mode in ("BASELINE", "COMPARE"):
+    has_description = "description" in data
+    
+    # DEBUG: Track what's happening in the safety check
+    # from crawler.core import logger
+    # logger.info(f"[DEBUG-DB] insert_crawl_page called: mode={crawl_mode}, desc={has_description}")
+
+    if (crawl_mode == "BASELINE") and not has_description:
         from crawler.core import logger
         logger.warning(
-            f"[SAFETY] Attempted to insert into crawl_pages during {crawl_mode} mode. "
+            f"[SAFETY] Attempted to insert into crawl_pages during {crawl_mode} mode without a description. "
             f"This operation is prohibited. URL: {data.get('url')}"
         )
         return None
@@ -298,10 +336,51 @@ def insert_crawl_page(data):
         row = cur.fetchone()
 
         if row:
-            # 2. 🛡️ INSERT-ONLY: Exists, so we don't update anything.
-            # We return 'Existed' so the worker knows it wasn't a fresh insert.
-            action = "Existed"
+            # 2. 🛡️ UPDATE metadata (and description if provided) in COMPARE mode
             affected_id = row[0]
+            if crawl_mode == "COMPARE":
+                # In COMPARE mode, we always want to sync the latest reachability (status_code, etc.)
+                if has_description:
+                    # Sync EVERYTHING including description (allows clearing it)
+                    cur.execute(
+                        """
+                        UPDATE crawl_pages 
+                        SET status_code = %s, content_type = %s, content_length = %s, 
+                            response_time_ms = %s, fetched_at = %s, description = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            data["status_code"], data["content_type"], data["content_length"],
+                            data["response_time_ms"], data["fetched_at"], data.get("description"),
+                            affected_id
+                        )
+                    )
+                    from crawler.core import logger
+                    logger.info(f"[DB-UPDATE] {canonical_url} id={affected_id} status={data['status_code']} desc='{data.get('description')}'")
+                else:
+                    # Sync metadata only (preserves existing description e.g. during fetch failures)
+                    cur.execute(
+                        """
+                        UPDATE crawl_pages 
+                        SET status_code = %s, content_type = %s, content_length = %s, 
+                            response_time_ms = %s, fetched_at = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            data["status_code"], data["content_type"], data["content_length"],
+                            data["response_time_ms"], data["fetched_at"],
+                            affected_id
+                        )
+                    )
+                    from crawler.core import logger
+                    logger.info(f"[DB-SYNC] {canonical_url} id={affected_id} status={data['status_code']}")
+            elif has_description:
+                # Fallback for other modes if a description is explicitly passed (rare)
+                cur.execute(
+                    "UPDATE crawl_pages SET description = %s, fetched_at = %s WHERE id = %s",
+                    (data.get("description"), data.get("fetched_at"), affected_id)
+                )
+            action = "Existed"
         else:
             # 3. 🆕 INSERT: Doesn't exist, so insert fresh
             try:
@@ -309,15 +388,15 @@ def insert_crawl_page(data):
                     """
                     INSERT INTO crawl_pages
                     (job_id, custid, siteid, url, parent_url, depth, status_code,
-                     content_type, content_length, response_time_ms, fetched_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     content_type, content_length, response_time_ms, fetched_at, description)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         data["job_id"], data["custid"], data["siteid"],
                         canonical_url, data["parent_url"], data["depth"],
                         data["status_code"], data["content_type"],
                         data["content_length"], data["response_time_ms"],
-                        data["fetched_at"]
+                        data["fetched_at"], data.get("description")
                     )
                 )
                 action = "Inserted"
