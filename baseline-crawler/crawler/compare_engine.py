@@ -48,11 +48,11 @@ class CompareEngine:
         if not rows:
             return []
 
-        # ✅ Canonical URL match
+        # Canonical URL match
         live_canon = LinkUtility.get_canonical_id(url, base_url, enforce_www=enforce_www)
         logger.info(f"[COMPARE] LIVE CANON: {live_canon}")
 
-        # ✅ Normalize LIVE HTML
+        # Normalize LIVE HTML
         normalized_live = ContentNormalizer.normalize_html(html)
         observed_hash = ContentNormalizer.semantic_hash(normalized_live)
         logger.info(f"[COMPARE] OBSERVED_HASH: {observed_hash}")
@@ -61,19 +61,33 @@ class CompareEngine:
         results = []
 
         for row in rows:
-
             if int(row["siteid"]) != int(siteid):
                 continue
 
             row_canon = row["url"]
 
-            if live_canon != row_canon:
+            # ROBUST FUZZY MATCHING
+            # 1. Strip 'www.'
+            live_loose = live_canon[4:] if live_canon.lower().startswith("www.") else live_canon
+            row_loose = row_canon[4:] if row_canon.lower().startswith("www.") else row_canon
+
+            # 2. Lowercase and Strip Trailing Slashes
+            live_loose = live_loose.lower().rstrip("/")
+            row_loose = row_loose.lower().rstrip("/")
+
+            # SUPER DEBUG for Site 93200 (or any site that says not monitored)
+            # We log every comparison attempt for this site specifically
+            if int(siteid) == 93200 or "pagentra" in live_canon:
+                 logger.info(f"[DEBUG-93200] Comparing LIVE_LOOSE '{live_loose}' vs ROW_LOOSE '{row_loose}' (Original ROW URL: '{row_canon}')")
+
+            # Debug log for mismatch within the same site
+            if live_loose != row_loose:
                 continue
 
             matched = True
             baseline_id = row["baseline_id"]
             
-            # Get threshold from DB or use default
+           
             threshold_val = row.get("threshold")
             threshold = float(threshold_val) if threshold_val is not None else self.DEFAULT_THRESHOLD
 
@@ -84,15 +98,29 @@ class CompareEngine:
 
             if not baseline:
                 logger.error("[COMPARE] Baseline missing in DB")
-                continue
+                results.append({
+                    "baseline_id": baseline_id,
+                    "url": url,
+                    "status": "EMPTY_BASELINE",
+                    "score": 0,
+                    "severity": "N/A"
+                })
+                break
 
             baseline_path = Path(baseline["baseline_path"])
 
             if not baseline_path.exists():
                 logger.error("[COMPARE] Baseline file missing on disk")
-                continue
+                results.append({
+                    "baseline_id": baseline_id,
+                    "url": url,
+                    "status": "EMPTY_BASELINE",
+                    "score": 0,
+                    "severity": "N/A"
+                })
+                break
 
-            # ✅ Normalize BASELINE HTML
+            #  Normalize BASELINE HTML
             old_raw_html = baseline_path.read_text(
                 encoding="utf-8",
                 errors="ignore"
@@ -108,7 +136,14 @@ class CompareEngine:
 
             if observed_hash == baseline_hash:
                 logger.info(f"[COMPARE] UNCHANGED (Hash Match) - {url}")
-                continue
+                results.append({
+                    "baseline_id": baseline_id,
+                    "url": url,
+                    "status": "UNCHANGED",
+                    "score": 0,
+                    "severity": "N/A"
+                })
+                break
 
             # =====================================
             # CALCULATE SCORE
@@ -122,7 +157,14 @@ class CompareEngine:
 
             if score < threshold:
                 logger.info(f"[COMPARE] UNCHANGED (Score {score} < {threshold}) - {url}")
-                continue
+                results.append({
+                    "baseline_id": baseline_id,
+                    "url": url,
+                    "status": "UNCHANGED",
+                    "score": score,
+                    "severity": "N/A"
+                })
+                break
 
             # =====================================
             # CHANGE DETECTED >= THRESHOLD
@@ -173,8 +215,15 @@ class CompareEngine:
                 "score": score,
                 "severity": severity
             })
+            break
 
         if not matched:
             logger.info(f"[COMPARE] Not monitored: {live_canon}")
+            results.append({
+                "url": url,
+                "status": "NOT_MONITORED",
+                "score": 0,
+                "severity": "N/A"
+            })
 
         return results
