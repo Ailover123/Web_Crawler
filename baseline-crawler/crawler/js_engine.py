@@ -14,6 +14,7 @@ from crawler.core import (
     JS_GOTO_TIMEOUT,
     JS_WAIT_TIMEOUT,
     JS_STABILITY_TIME,
+    USER_AGENT,
     logger
 )
 
@@ -139,69 +140,91 @@ class RenderResult:
 
 class BrowserManager:
     """
-    FLOW: Spawns a dedicated Playwright thread -> Maintains a single browser context -> 
-    Processes URLs from an internal queue -> Normalizes whitespace in result -> Returns HTML + Final URL.
+    FLOW: Spawns multiple dedicated Playwright threads -> Each maintains its own independent browser context -> 
+    Processes URLs from a shared queue -> Returns HTML + Final URL safely.
     """
     _request_queue = queue.Queue()
     _init_lock = threading.Lock()
-    _worker_thread = None
+    _worker_threads = []
 
     @classmethod
-    def _render_loop(cls):
+    def render_parallel(cls, url: str) -> tuple[str, str, int]:
+        return cls.render_sync(url)
+
+    @classmethod
+    def _render_loop(cls, worker_id: int):
+        """
+        Independent worker loop. Each thread gets its own Playwright/Browser instance for thread-safety.
+        """
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
                     headless=True,
-                    args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"],
+                    args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
                 )
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                    user_agent=USER_AGENT,
                     viewport={"width": 1024, "height": 768}
                 )
-                logger.info("[JS-ENGINE] Dedicated render thread started.")
+                logger.info(f"[JS-ENGINE] Render Worker-{worker_id} ready.")
 
                 while True:
                     req = cls._request_queue.get()
-                    if req is None: break
+                    if req is None: 
+                        cls._request_queue.put(None) # Pass onto other workers
+                        break
                     
                     try:
                         page = context.new_page()
                         try:
-                            response = page.goto(req.url, wait_until="domcontentloaded", timeout=JS_GOTO_TIMEOUT * 1000)
-                            status_code = response.status if response else 200
-                            
-                            try:
-                                page.wait_for_function("() => document.body && document.body.children.length > 0", timeout=JS_WAIT_TIMEOUT * 1000)
-                            except Exception: pass
-                            
-                            if JS_STABILITY_TIME > 0:
-                                page.wait_for_timeout(JS_STABILITY_TIME * 1000)
-                                
-                            try:
-                                page.wait_for_load_state("load", timeout=5000)
-                            except Exception: pass
+                            # RESOURCE BLOCKING
+                            def route_intercept(route):
+                                if route.request.resource_type in ["image", "font", "media"]:
+                                    return route.abort()
+                                return route.continue_()
+                            page.route("**/*", route_intercept)
 
-                            final_url = page.url
+                            # Two-stage load for speed:
+                            # 1. 'commit' to ensure site is reachable (Fast Fail)
+                            try:
+                                response = page.goto(req.url, wait_until="commit", timeout=20000)
+                                status_code = response.status if response else 0
+                                
+                                # 2. If reachable, wait for content
+                                if 200 <= status_code <= 299:
+                                    try:
+                                        page.wait_for_load_state("domcontentloaded", timeout=10000)
+                                    except Exception: pass
+                            except Exception as e:
+                                req.result_queue.put(RenderResult(error=e))
+                                continue
+
                             content = page.content()
-                            req.result_queue.put(RenderResult(content, final_url, status_code))
+                            req.result_queue.put(RenderResult(content, page.url, status_code))
                         except Exception as e:
                             req.result_queue.put(RenderResult(error=e))
                         finally:
                             page.close()
                     except Exception as e:
-                        logger.error(f"[JS-ENGINE] Loop error: {e}")
+                        logger.error(f"[JS-ENGINE] Worker-{worker_id} error: {e}")
+                
+                browser.close()
         except Exception as e:
-            logger.critical(f"[JS-ENGINE] Fatal thread error: {e}")
+            logger.critical(f"[JS-ENGINE] Worker-{worker_id} fatal error: {e}")
 
     @classmethod
     def _ensure_running(cls):
-        if cls._worker_thread and cls._worker_thread.is_alive():
+        if cls._worker_threads and all(t.is_alive() for t in cls._worker_threads):
             return
         with cls._init_lock:
-            if cls._worker_thread and cls._worker_thread.is_alive():
+            if cls._worker_threads and all(t.is_alive() for t in cls._worker_threads):
                 return
-            cls._worker_thread = threading.Thread(target=cls._render_loop, daemon=True, name="RenderWorker")
-            cls._worker_thread.start()
+            cls._worker_threads = []
+            num_workers = 5
+            for i in range(num_workers):
+                t = threading.Thread(target=cls._render_loop, args=(i,), daemon=True, name=f"RenderWorker-{i}")
+                t.start()
+                cls._worker_threads.append(t)
 
     @classmethod
     def render_sync(cls, url: str) -> tuple[str, str, int]:

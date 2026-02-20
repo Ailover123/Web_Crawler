@@ -4,6 +4,7 @@ CONSOLIDATED FROM: fetcher.py, parser.py, normalizer.py, url_utils.py, throttle.
 KEY FUNCTIONS/CLASSES: LinkUtility, TrafficControl, PageFetcher, LinkExtractor
 """
 
+import os
 import requests
 import time
 import urllib3
@@ -12,7 +13,8 @@ import threading
 import re
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urlunparse, urljoin, quote, unquote
-from crawler.core import USER_AGENT, REQUEST_TIMEOUT, logger
+from playwright.sync_api import sync_playwright
+from crawler.core import USER_AGENT, REQUEST_TIMEOUT, DATA_DIR, JS_GOTO_TIMEOUT, JS_WAIT_TIMEOUT, JS_STABILITY_TIME, logger
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -330,6 +332,62 @@ class PageFetcher:
                     "status_code": 0, "final_url": url,
                     "content_type": "", "fetch_time_ms": int((time.time() - start_time) * 1000)
                 }
+
+    @staticmethod
+    def fetch_rendered(url, siteid=None, save_to_tmp=False):
+        """
+        Optimized Playwright fetcher.
+        Uses a shared browser context and blocks heavy resources for speed.
+        """
+        from crawler.js_engine import BrowserManager
+        start_time = time.time()
+        try:
+            # We use a custom render call that supports resource blocking
+            # Or we just use BrowserManager.render_sync and ensure it's optimized.
+            html, final_url, status_code = BrowserManager.render_sync(url)
+            fetch_time_ms = int((time.time() - start_time) * 1000)
+
+            if 200 <= status_code <= 299:
+                # Save to temp if requested (User snippet logic)
+                if save_to_tmp and siteid:
+                    try:
+                        tmp_dir = DATA_DIR / "tmp"
+                        tmp_dir.mkdir(parents=True, exist_ok=True)
+                        filepath = tmp_dir / f"{siteid}.html"
+                        filepath.write_text(html, encoding="utf-8")
+                    except Exception as e:
+                        logger.error(f"[PageFetcher] Failed to save tmp file: {e}")
+
+                return {
+                    "success": True,
+                    "html": html,
+                    "status_code": status_code,
+                    "final_url": final_url,
+                    "fetch_time_ms": fetch_time_ms,
+                    "content_type": "text/html",
+                    "response": type('obj', (object,), {
+                        'status_code': status_code,
+                        'text': html,
+                        'content': html.encode(),
+                        'url': final_url,
+                        'headers': {'Content-Type': 'text/html'}
+                    })
+                }
+            else:
+                return {
+                    "success": False,
+                    "status_code": status_code,
+                    "error": f"HTTP {status_code}",
+                    "fetch_time_ms": fetch_time_ms
+                }
+        except Exception as e:
+            logger.error(f"[Optimized Playwright Error] {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "status_code": 0,
+                "fetch_time_ms": int((time.time() - start_time) * 1000)
+            }
 # === LINK EXTRACTOR ===
 
 class LinkExtractor:

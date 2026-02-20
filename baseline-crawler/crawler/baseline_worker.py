@@ -53,28 +53,12 @@ class BaselineWorker:
             # Polite delay BEFORE fetch
             time.sleep(CRAWL_DELAY)
 
-            # Pass siteid to allow global TrafficControl & 429 handling
-            result = PageFetcher.fetch(fetch_url, siteid=self.siteid)
+            # Pass siteid and save_to_tmp to maintain user snippet behavior
+            result = PageFetcher.fetch_rendered(fetch_url, siteid=self.siteid, save_to_tmp=True)
             if not result["success"]:
                 return "failed", f"Fetch failed for site={self.siteid} url={url}: {result.get('error')}", thread_name
 
-            resp = result["response"]
-            ct = resp.headers.get("Content-Type", "").lower()
-            if "text/html" not in ct:
-                return "skipped", f"Not HTML ({ct})", thread_name
-
-            html_content = resp.text
-
-            # ----------------------------------------------------
-            # 🚀 SPA / React Detection & Escalation
-            # ----------------------------------------------------
-            if JSIntelligence.needs_js_rendering(html_content):
-                try:
-                    rendered_html, final_url, js_status = BrowserManager.render_sync(fetch_url)
-                    if rendered_html and len(rendered_html) > len(html_content):
-                        html_content = rendered_html
-                except Exception as e:
-                    logger.warning(f"{thread_name} : [JS-RENDER] Failed for {url}: {e}")
+            html_content = result["html"]
             
             # ----------------------------------------------------
             # 🔗 Base Tag Injection (Fixes broken CSS/Images locally)

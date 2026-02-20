@@ -722,7 +722,7 @@ def main():
         
         # Manually attach FileHandler since setup_logger returns early if handlers exist
         
-        file_handler = FlushingFileHandler(log_path)
+        file_handler = FlushingFileHandler(log_path, encoding='utf-8')
         file_handler.setFormatter(CompanyFormatter())
         logger.addHandler(file_handler)
         
